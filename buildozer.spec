@@ -11,6 +11,11 @@ version = 1.0
 # Kivy + USB-OTG serial (CH34x/CP210x/FTDI/PL2303) + pyjnius для Android API
 requirements = python3,kivy==2.3.0,usb4a,usbserial4a,pyjnius
 
+# Фиксируем python-for-android на релиз, собирающий целевой Python 3.11:
+# в 3.13 изменилась сигнатура _PyLong_AsByteArray, и готовые .c-файлы Kivy 2.3.0
+# (сгенерированы старым Cython) не компилируются под 3.13.
+p4a.branch = 2024.01.21
+
 orientation = portrait
 fullscreen = 0
 
