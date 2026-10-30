@@ -65,10 +65,9 @@ jobs:
         run: |
           echo "### Сборка упала" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tail -n 80 build.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(нет build.log)" >> "$GITHUB_STEP_SUMMARY"
+          tail -n 120 build.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(нет build.log)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          # ключевые строки с ошибками -> в аннотации (их видно через API)
-          grep -iE "error|exception|traceback|not found|no module|failed|command failed" build.log 2>/dev/null \
-            | tail -n 25 | while IFS= read -r line; do
-              printf '::error::%s\n' "${line:0:500}"
-            done || true
+          # ПОСЛЕДНИЕ строки лога дословно -> в аннотации (единственный читаемый канал)
+          tail -n 45 build.log 2>/dev/null | while IFS= read -r line; do
+            [ -n "$line" ] && printf '::error::%s\n' "${line:0:600}"
+          done || true
