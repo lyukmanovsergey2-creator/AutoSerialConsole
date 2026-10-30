@@ -34,8 +34,9 @@ jobs:
       - name: Install Buildozer
         run: |
           python -m pip install --upgrade pip wheel setuptools
-          # Cython строго 0.29.33 — более новые ломают сборку Kivy 2.3.0
-          pip install "cython==0.29.33" buildozer
+          # Cython 3.0.11 — совместим с целевым Python 3.13 (новый C-API,
+          # _PyLong_AsByteArray с 6 аргументами) и с Kivy 2.3.0
+          pip install "cython==3.0.11" buildozer
 
       - name: Build debug APK
         run: |
