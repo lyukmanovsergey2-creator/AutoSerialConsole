@@ -51,9 +51,15 @@ jobs:
 
       - name: Build debug APK
         run: |
-          set -o pipefail
           export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
-          yes | buildozer -v android debug 2>&1 | tee build.log
+          # НЕ используем "yes |" (даёт SIGPIPE/141 после успеха) — лицензии
+          # принимаются через android.accept_sdk_license=True. Берём РЕАЛЬНЫЙ
+          # код возврата buildozer через PIPESTATUS, а не tee.
+          set +e
+          buildozer -v android debug 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          echo "buildozer exit code: $code"
+          exit $code
 
       - name: Upload APK
         if: success()
