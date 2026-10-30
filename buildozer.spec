@@ -19,10 +19,11 @@ p4a.branch = v2024.01.21
 orientation = portrait
 fullscreen = 0
 
-# USB Host для работы с OTG-переходником. Доступ к конкретному устройству
-# приложение запрашивает в рантайме (системный диалог при первом подключении).
+# Доступ к USB-устройству (OTG-переходнику) приложение запрашивает в рантайме
+# через usb4a (системный диалог при первом подключении). Объявление
+# android.hardware.usb.host в манифесте для работы не требуется и опущено
+# (флаг --feature не поддерживается в p4a v2024.01.21).
 android.permissions = INTERNET
-android.features = android.hardware.usb.host
 
 android.api = 34
 android.minapi = 21
