@@ -21,7 +21,11 @@ android.features = android.hardware.usb.host
 
 android.api = 34
 android.minapi = 21
-android.archs = arm64-v8a, armeabi-v7a
+# NDK 25b — его clang менее строг (нужно для сборки Kivy 2.3.0)
+android.ndk = 25b
+# пока только arm64-v8a (покрывает практически все современные телефоны,
+# сборка вдвое быстрее); armeabi-v7a можно добавить позже
+android.archs = arm64-v8a
 android.allow_backup = 1
 # автоматически принимать лицензии Android SDK (для CI без интерактива)
 android.accept_sdk_license = True
