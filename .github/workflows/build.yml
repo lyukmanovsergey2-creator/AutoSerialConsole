@@ -73,19 +73,20 @@ jobs:
       - name: Report failure details
         if: failure()
         run: |
-          # buildozer при падении печатает большой блок ENVIRONMENT, а реальная
-          # ошибка и строка "# Command failed:" идут ПЕРЕД ним. Вырезаем дамп.
-          ln=$(grep -n "ENVIRONMENT:" build.log 2>/dev/null | tail -1 | cut -d: -f1)
-          if [ -n "$ln" ]; then
-            head -n "$ln" build.log | tail -n 70 > /tmp/err.txt
-          else
-            tail -n 70 build.log > /tmp/err.txt 2>/dev/null || true
-          fi
-          echo "### Сборка упала (фрагмент перед ENVIRONMENT)" >> "$GITHUB_STEP_SUMMARY"
+          # 1) убрать ANSI-коды; 2) выкинуть служебные строки buildozer и
+          # ENVIRONMENT-дамп (они начинаются с '#'); 3) показать хвост — там
+          # настоящая ошибка (gradle / компилятор / p4a).
+          sed -r 's/\x1b\[[0-9;?]*[mK]//g' build.log > /tmp/clean.log 2>/dev/null || cp build.log /tmp/clean.log
+          grep -vE '^[[:space:]]*#' /tmp/clean.log > /tmp/noenv.log 2>/dev/null || cp /tmp/clean.log /tmp/noenv.log
+          echo "### Хвост лога (без служебных строк)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat /tmp/err.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          tail -n 100 /tmp/noenv.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          # в аннотации (единственный читаемый отсюда канал)
-          while IFS= read -r line; do
-            [ -n "$line" ] && printf '::error::%s\n' "${line:0:600}"
-          done < /tmp/err.txt || true
+          # приоритет — строки с явными маркерами ошибок (исключая имена .py)
+          grep -nEi 'traceback|error:|exception|aborting|returned non-zero|FAILURE:|what went wrong|BUILD FAILED|task .*FAILED|no such file|cannot find|undefined reference|fatal error|ld:' /tmp/noenv.log 2>/dev/null \
+            | grep -vEi 'errors?\.py|exceptions?\.py|_exceptions|/test_|\.pyc' | tail -n 20 \
+            | while IFS= read -r line; do printf '::error::%s\n' "${line:0:600}"; done || true
+          # и просто последние строки
+          tail -n 20 /tmp/noenv.log | while IFS= read -r line; do
+            [ -n "$line" ] && printf '::error::TAIL %s\n' "${line:0:550}"
+          done || true
