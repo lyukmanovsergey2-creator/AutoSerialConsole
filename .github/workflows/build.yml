@@ -83,7 +83,12 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           tail -n 120 /tmp/noenv.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          # СНАЧАЛА последние строки (реальный конец), т.к. аннотаций лимит ~10
-          tail -n 14 /tmp/noenv.log | while IFS= read -r line; do
-            [ -n "$line" ] && printf '::error::T %s\n' "${line:0:600}"
+          # argparse-ошибка p4a (unrecognized/invalid) — самое важное
+          grep -niE "unrecognized arguments|: error:|invalid choice|apk: error|p4a: error|the following arguments" /tmp/clean.log 2>/dev/null \
+            | tail -n 4 | while IFS= read -r line; do printf '::error::E %s\n' "${line:0:600}"; done || true
+          # строка вызова p4a apk (чтобы увидеть переданные флаги)
+          grep -niE "toolchain\.py apk| apk .*--|pythonforandroid.*apk|/p4a.* apk" /tmp/clean.log 2>/dev/null \
+            | tail -n 2 | while IFS= read -r line; do printf '::error::C %s\n' "${line:0:600}"; done || true
+          tail -n 4 /tmp/noenv.log | while IFS= read -r line; do
+            [ -n "$line" ] && printf '::error::T %s\n' "${line:0:550}"
           done || true
