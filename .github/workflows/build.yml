@@ -80,13 +80,9 @@ jobs:
           grep -vE '^[[:space:]]*#' /tmp/clean.log > /tmp/noenv.log 2>/dev/null || cp /tmp/clean.log /tmp/noenv.log
           echo "### Хвост лога (без служебных строк)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tail -n 100 /tmp/noenv.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          tail -n 120 /tmp/noenv.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          # приоритет — строки с явными маркерами ошибок (исключая имена .py)
-          grep -nEi 'traceback|error:|exception|aborting|returned non-zero|FAILURE:|what went wrong|BUILD FAILED|task .*FAILED|no such file|cannot find|undefined reference|fatal error|ld:' /tmp/noenv.log 2>/dev/null \
-            | grep -vEi 'errors?\.py|exceptions?\.py|_exceptions|/test_|\.pyc' | tail -n 20 \
-            | while IFS= read -r line; do printf '::error::%s\n' "${line:0:600}"; done || true
-          # и просто последние строки
-          tail -n 20 /tmp/noenv.log | while IFS= read -r line; do
-            [ -n "$line" ] && printf '::error::TAIL %s\n' "${line:0:550}"
+          # СНАЧАЛА последние строки (реальный конец), т.к. аннотаций лимит ~10
+          tail -n 14 /tmp/noenv.log | while IFS= read -r line; do
+            [ -n "$line" ] && printf '::error::T %s\n' "${line:0:600}"
           done || true
