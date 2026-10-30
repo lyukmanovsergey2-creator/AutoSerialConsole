@@ -1,0 +1,30 @@
+name: Build APK
+
+# Сборка APK на серверах GitHub (там есть доступ к Android SDK/NDK).
+# Запускается при пуше в main и вручную (вкладка Actions -> Run workflow).
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Buildozer (debug APK)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build APK with Buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
+        id: buildozer
+        with:
+          command: buildozer android debug
+          buildozer_version: stable
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoSerialConsole-debug-apk
+          path: ${{ steps.buildozer.outputs.filename }}
