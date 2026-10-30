@@ -23,6 +23,8 @@ android.api = 34
 android.minapi = 21
 android.archs = arm64-v8a, armeabi-v7a
 android.allow_backup = 1
+# автоматически принимать лицензии Android SDK (для CI без интерактива)
+android.accept_sdk_license = True
 
 [buildozer]
 log_level = 2

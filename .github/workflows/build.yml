@@ -1,7 +1,7 @@
 name: Build APK
 
-# Сборка APK на серверах GitHub (там есть доступ к Android SDK/NDK).
-# Запускается при пуше в main и вручную (вкладка Actions -> Run workflow).
+# Прямая сборка APK на раннере GitHub (без сторонних Docker-действий).
+# Запускается при пуше в main и вручную (Actions -> Run workflow).
 
 on:
   push:
@@ -12,19 +12,61 @@ jobs:
   build:
     name: Buildozer (debug APK)
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build APK with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        id: buildozer
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          command: buildozer android debug
-          buildozer_version: stable
+          python-version: "3.11"
 
-      - name: Upload APK artifact
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip openjdk-17-jdk \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev \
+            build-essential ccache libltdl-dev
+
+      - name: Install Buildozer
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          pip install "cython==0.29.36" buildozer
+
+      - name: Build debug APK
+        run: |
+          set -o pipefail
+          export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
+          yes | buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AutoSerialConsole-debug-apk
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Report failure details
+        if: failure()
+        run: |
+          echo "### Сборка упала" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 80 build.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(нет build.log)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # ключевые строки с ошибками -> в аннотации (их видно через API)
+          grep -iE "error|exception|traceback|not found|no module|failed|command failed" build.log 2>/dev/null \
+            | tail -n 25 | while IFS= read -r line; do
+              printf '::error::%s\n' "${line:0:500}"
+            done || true
