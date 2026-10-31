@@ -241,13 +241,29 @@ class AppSmokeTests(unittest.TestCase):
         self.app._flush_rx()
         self.assertEqual(self.app.sp_vendor.text, "Cisco")
 
+    def test_terminal_renders_every_chunk(self):
+        # Регрессия: раньше обновлялся только последний Label, поэтому
+        # терялась каждая 25-я строка (24, 49, ...).
+        for i in range(60):
+            self.app._append("line%02d\n" % i)
+
+        rendered = "\n".join(lbl.text for lbl in self.app._chunk_labels)
+        self.assertEqual(rendered, self.app._term.text)
+        for i in (0, 24, 25, 49, 50, 59):
+            self.assertIn("line%02d" % i, rendered)
+
     def test_terminal_chunks_and_trim(self):
         self.app._append("\n".join("line%d" % i for i in range(120)))
         self.assertGreater(len(self.app._chunk_labels), 1)
+        rendered = "\n".join(lbl.text for lbl in self.app._chunk_labels)
+        self.assertEqual(rendered, self.app._term.text)
 
         self.app._append("\n".join("x%d" % i for i in range(2100)))
         self.assertGreater(self.app._rendered_trimmed, 0)
         self.assertLessEqual(len(self.app._chunk_labels), 82)
+        rendered = "\n".join(lbl.text for lbl in self.app._chunk_labels)
+        self.assertEqual(rendered, self.app._term.text)
+        self.assertIn("x2099", rendered)
 
     def test_open_port_sets_short_read_timeout(self):
         port = _FakePort(opens=True)

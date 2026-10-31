@@ -661,30 +661,29 @@ class AutoSerialApp(App):
         self.scroll.scroll_y = 0
 
     def _sync_terminal_view(self):
-        # Модель удаляет строки порциями, поэтому и Label-ы убираем порциями.
-        while self._rendered_trimmed < self._term.trimmed and self._chunk_labels:
-            self.term_box.remove_widget(self._chunk_labels.pop(0))
-            self._rendered_trimmed += TERM_CHUNK_LINES
-        if not self._chunk_labels:
-            self._rendered_trimmed = self._term.trimmed
-
+        # Держим ровно столько Label, сколько нужно для текущего числа строк.
+        # При обрезке истории модель уменьшает число строк — лишние Label
+        # убираем с начала, потому что там самые старые строки.
         lines = self._term.display_lines()
-        need = (len(lines) + TERM_CHUNK_LINES - 1) // TERM_CHUNK_LINES
+        need = max(1, (len(lines) + TERM_CHUNK_LINES - 1) // TERM_CHUNK_LINES)
+
+        while len(self._chunk_labels) > need:
+            self.term_box.remove_widget(self._chunk_labels.pop(0))
         while len(self._chunk_labels) < need:
             lbl = self._new_term_label()
             self._chunk_labels.append(lbl)
             self.term_box.add_widget(lbl)
 
-        if not self._chunk_labels:
-            return
+        # Обновляем ВСЕ чанки, а не только последний: иначе при выводе
+        # нескольких строк за один раз (баннер, show run) промежуточные
+        # Label-ы остаются пустыми, а на границе чанка теряется строка.
+        for idx, lbl in enumerate(self._chunk_labels):
+            start = idx * TERM_CHUNK_LINES
+            text = "\n".join(lines[start:start + TERM_CHUNK_LINES])
+            if lbl.text != text:
+                lbl.text = text
 
-        idx = min((len(lines) - 1) // TERM_CHUNK_LINES,
-                  len(self._chunk_labels) - 1)
-        start = idx * TERM_CHUNK_LINES
-        text = "\n".join(lines[start:start + TERM_CHUNK_LINES])
-        lbl = self._chunk_labels[idx]
-        if lbl.text != text:
-            lbl.text = text
+        self._rendered_trimmed = self._term.trimmed
 
     def _clear(self):
         self._term = TerminalModel(TERM_MAX_LINES, TERM_CHUNK_LINES)
