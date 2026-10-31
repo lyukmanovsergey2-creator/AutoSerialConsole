@@ -1,11 +1,13 @@
 name: Build APK
 
 # Прямая сборка APK на раннере GitHub (без сторонних Docker-действий).
-# Запускается при пуше в main и вручную (Actions -> Run workflow).
+# Запускается при пуше в main/master и fix/*, для pull request и вручную
+# (Actions -> Run workflow).
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'fix/**' ]
+  pull_request:
   workflow_dispatch:
 
 jobs:
