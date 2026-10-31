@@ -74,6 +74,8 @@ TERM_MAX_LINES = 2000
 TERM_CHUNK_LINES = 25
 # Таймаут записи в порт (секунды), чтобы UI не зависал.
 TX_WRITE_TIMEOUT = 0.5
+# Окончание строки, которое отправляется вместе с командой.
+LINE_ENDINGS = {"CR": b"\r", "LF": b"\n", "CRLF": b"\r\n"}
 
 
 def _mono_font_path():
@@ -117,6 +119,7 @@ class AutoSerialApp(App):
         self._scroll_pending = False
         self._dtr = True
         self._mono_font = _mono_font_path()
+        self._font_size = 13
 
         # Клавиатура не должна закрывать поле ввода команды.
         try:
@@ -174,15 +177,45 @@ class AutoSerialApp(App):
         root.add_widget(self.scroll)
         self._sync_terminal_view()
 
-        # ввод команды + спецкнопки
+        # инструменты терминала: копирование, очистка, размер шрифта
+        row_tools = BoxLayout(size_hint_y=None, height="40dp", spacing=4)
+        row_tools.add_widget(Button(text="Копировать", font_size="12sp",
+                                    on_release=lambda *_: self.copy_terminal()))
+        row_tools.add_widget(Button(text="Очистить", font_size="12sp",
+                                    on_release=lambda *_: self.clear_terminal()))
+        row_tools.add_widget(Button(text="A-", size_hint_x=None, width="44dp",
+                                    font_size="12sp",
+                                    on_release=lambda *_: self.change_font_size(-1)))
+        row_tools.add_widget(Button(text="A+", size_hint_x=None, width="44dp",
+                                    font_size="12sp",
+                                    on_release=lambda *_: self.change_font_size(1)))
+        root.add_widget(row_tools)
+
+        # окончание строки и спецклавиши
+        row_special = BoxLayout(size_hint_y=None, height="40dp", spacing=4)
+        row_special.add_widget(Label(text="EOL:", size_hint_x=None, width="44dp",
+                                     font_size="12sp"))
+        self.sp_eol = Spinner(text="CR", values=["CR", "LF", "CRLF"],
+                              size_hint_x=None, width="72dp", font_size="12sp")
+        row_special.add_widget(self.sp_eol)
+        row_special.add_widget(Button(text="^C", size_hint_x=None, width="48dp",
+                                      font_size="12sp",
+                                      on_release=lambda *_: self.send_raw(b"\x03")))
+        row_special.add_widget(Button(text="Esc", size_hint_x=None, width="48dp",
+                                      font_size="12sp",
+                                      on_release=lambda *_: self.send_raw(b"\x1b")))
+        row_special.add_widget(Button(text="Tab", size_hint_x=None, width="48dp",
+                                      font_size="12sp",
+                                      on_release=lambda *_: self.send_raw(b"\t")))
+        root.add_widget(row_special)
+
+        # ввод команды
         row4 = BoxLayout(size_hint_y=None, height="48dp", spacing=4)
         self.inp = TextInput(multiline=False, hint_text="команда…",
                              on_text_validate=lambda *_: self.send_line())
         row4.add_widget(self.inp)
         row4.add_widget(Button(text="⏎", size_hint_x=None, width="52dp",
                                on_release=lambda *_: self.send_line()))
-        row4.add_widget(Button(text="Tab", size_hint_x=None, width="60dp",
-                               on_release=lambda *_: self.send_raw(b"\t")))
         root.add_widget(row4)
 
         if not USB_OK:
@@ -593,7 +626,8 @@ class AutoSerialApp(App):
     def send_line(self):
         s = self.inp.text
         self.inp.text = ""
-        self.send_raw(s.encode("utf-8", "replace") + b"\r")
+        eol = LINE_ENDINGS.get(self.sp_eol.text, b"\r")
+        self.send_raw(s.encode("utf-8", "replace") + eol)
 
     def send_raw(self, b):
         if self.port is None:
@@ -602,6 +636,34 @@ class AutoSerialApp(App):
         if self._tx_queue.qsize() > 256:
             return
         self._tx_queue.put(b)
+
+    def copy_terminal(self):
+        text = self._term.text
+        if not text:
+            self._set_status("Терминал пуст.")
+            return
+        try:
+            # Импорт здесь, чтобы тесты и desktop-запуск не требовали
+            # конкретного clipboard-провайдера Kivy.
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(text)
+        except Exception as e:
+            self._set_status("Не удалось скопировать: %s" % e)
+            return
+        self._set_status("Скопировано строк: %d" % len(text.splitlines()))
+
+    def clear_terminal(self):
+        self._clear()
+        self._set_status("Терминал очищен.")
+
+    def change_font_size(self, delta):
+        size = max(9, min(24, self._font_size + int(delta)))
+        if size == self._font_size:
+            return
+        self._font_size = size
+        for lbl in self._chunk_labels:
+            lbl.font_size = "%dsp" % size
+        self._set_status("Шрифт: %d" % size)
 
     def toggle_dtr_rts(self):
         if self.port is None:
@@ -643,7 +705,8 @@ class AutoSerialApp(App):
     # ----------------------------------------------- вид терминала ----------
     def _new_term_label(self):
         lbl = Label(text="", size_hint_y=None, halign="left", valign="top",
-                    markup=False, font_name=self._mono_font, font_size="13sp",
+                    markup=False, font_name=self._mono_font,
+                    font_size="%dsp" % self._font_size,
                     color=(0.85, 0.85, 0.85, 1))
         lbl.bind(width=lambda w, *_: setattr(w, "text_size", (w.width, None)))
         lbl.bind(texture_size=lambda w, *_: setattr(w, "height",

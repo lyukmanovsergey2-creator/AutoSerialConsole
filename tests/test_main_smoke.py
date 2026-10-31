@@ -73,6 +73,14 @@ class _ScrollView(_Widget):
     pass
 
 
+class _Clipboard(object):
+    text = ""
+
+    @classmethod
+    def copy(cls, value):
+        cls.text = value
+
+
 class _App(object):
     def __init__(self):
         self.title = None
@@ -109,6 +117,7 @@ def _install_kivy_stubs():
     module("kivy.app", App=_App)
     module("kivy.clock", Clock=_Clock, mainthread=lambda f: f)
     module("kivy.core")
+    module("kivy.core.clipboard", Clipboard=_Clipboard)
     module("kivy.core.window", Window=module("kivy.core.window.window_stub"))
     module("kivy.uix")
     module("kivy.uix.boxlayout", BoxLayout=_BoxLayout)
@@ -264,6 +273,41 @@ class AppSmokeTests(unittest.TestCase):
         rendered = "\n".join(lbl.text for lbl in self.app._chunk_labels)
         self.assertEqual(rendered, self.app._term.text)
         self.assertIn("x2099", rendered)
+
+    def test_copy_terminal_to_clipboard(self):
+        self.app._append("line1\nline2")
+        self.app.copy_terminal()
+        clipboard = sys.modules["kivy.core.clipboard"].Clipboard
+        self.assertEqual(clipboard.text, self.app._term.text)
+        self.assertIn("Скопировано", self.app.lbl_status.text)
+
+    def test_clear_terminal(self):
+        self.app._append("line1\nline2")
+        self.app.clear_terminal()
+        self.assertEqual(self.app._term.text, "")
+        self.assertEqual(len(self.app._chunk_labels), 1)
+        self.assertEqual(self.app.lbl_status.text, "Терминал очищен.")
+
+    def test_line_ending_setting(self):
+        self.app.port = _FakePort(opens=True)
+        self.app.inp.text = "cmd"
+        self.app.sp_eol.text = "LF"
+        self.app.send_line()
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"cmd\n")
+
+        self.app.inp.text = "cmd"
+        self.app.sp_eol.text = "CRLF"
+        self.app.send_line()
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"cmd\r\n")
+
+    def test_font_size_changes_labels(self):
+        old = self.app._font_size
+        self.app.change_font_size(1)
+        self.assertEqual(self.app._font_size, old + 1)
+        expected = "%dsp" % (old + 1)
+        self.assertTrue(all(lbl.font_size == expected
+                            for lbl in self.app._chunk_labels))
+        self.assertIn("Шрифт:", self.app.lbl_status.text)
 
     def test_open_port_sets_short_read_timeout(self):
         port = _FakePort(opens=True)
