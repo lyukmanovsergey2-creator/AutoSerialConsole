@@ -41,7 +41,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   build:
-    name: Buildozer (debug APK)
+    name: Buildozer (APK)
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -81,24 +81,99 @@ jobs:
           # более новый buildozer передаёт флаги, которых старый p4a не знает.
           pip install "cython==0.29.33" "buildozer==1.5.0"
 
-      - name: Build debug APK
+      - name: Build APK
         run: |
           export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
           # НЕ используем "yes |" (даёт SIGPIPE/141 после успеха) — лицензии
           # принимаются через android.accept_sdk_license=True. Берём РЕАЛЬНЫЙ
           # код возврата buildozer через PIPESTATUS, а не tee.
+          # Сначала пробуем release-сборку (не debuggable). Если gradle/p4a
+          # на ней спотыкается — откатываемся на проверенную debug-сборку;
+          # подпись всё равно накладывается отдельным шагом ниже.
           set +e
-          buildozer -v android debug 2>&1 | tee build.log
+          buildozer -v android release 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            echo "::warning title=Release build failed::Собираю debug APK как запасной вариант"
+            buildozer -v android debug 2>&1 | tee -a build.log
+            code=${PIPESTATUS[0]}
+          fi
           echo "buildozer exit code: $code"
           exit $code
+
+      # Подписываем APK постоянным ключом, чтобы обновления ставились поверх
+      # установленной версии. Ключ хранится в секретах репозитория.
+      - name: Sign APK
+        if: success()
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
+          BT=$(ls -d "$HOME"/.buildozer/android/platform/android-sdk/build-tools/* | sort -V | tail -1)
+          APK=$(ls -t bin/*.apk | head -1)
+          echo "Исходный APK: $APK"
+
+          ALIAS="${KEY_ALIAS:-autoserial}"
+          [ -n "${KEY_PASS:-}" ] || KEY_PASS="${KS_PASS:-}"
+
+          if [ -n "${KS_B64:-}" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "Подпись: постоянный ключ из секретов."
+            STABLE=1
+          else
+            echo "::warning title=Нет ключа подписи::Секрет ANDROID_KEYSTORE_BASE64 не задан — подписываю временным ключом. APK соберётся, но обновление поверх уже установленной версии не встанет."
+            KS_PASS="${KS_PASS:-ephemeral}"
+            KEY_PASS="${KEY_PASS:-ephemeral}"
+            openssl req -x509 -newkey rsa:2048 -days 10000 -nodes \
+              -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" \
+              -subj "/CN=AutoSerialConsole" >/dev/null 2>&1
+            openssl pkcs12 -export -in "$RUNNER_TEMP/cert.pem" \
+              -inkey "$RUNNER_TEMP/key.pem" -name "$ALIAS" \
+              -out "$RUNNER_TEMP/release.keystore" \
+              -passout "pass:$KS_PASS" >/dev/null 2>&1
+            STABLE=0
+          fi
+
+          VERSION=$(grep -E '^version[[:space:]]*=' buildozer.spec | head -1 | cut -d= -f2 | tr -d ' ')
+          OUT="dist/AutoSerialConsole-$VERSION.apk"
+          mkdir -p dist
+
+          # Убираем старую (debug) подпись, выравниваем и подписываем заново.
+          cp "$APK" "$RUNNER_TEMP/app-unsigned.apk"
+          zip -q -d "$RUNNER_TEMP/app-unsigned.apk" \
+            'META-INF/*.RSA' 'META-INF/*.SF' 'META-INF/*.MF' || true
+          "$BT/zipalign" -f -p 4 "$RUNNER_TEMP/app-unsigned.apk" "$RUNNER_TEMP/app-aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.keystore" \
+            --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$KS_PASS" \
+            --key-pass "pass:$KEY_PASS" \
+            --out "$OUT" "$RUNNER_TEMP/app-aligned.apk"
+          "$BT/apksigner" verify --print-certs "$OUT"
+          ls -l "$OUT"
+
+          {
+            echo "### APK подписан"
+            echo ""
+            echo "- файл: \`$OUT\`"
+            echo "- version: \`$VERSION\`"
+            if [ "$STABLE" = "1" ]; then
+              echo "- ключ: постоянный (из секретов) — обновления ставятся поверх"
+            else
+              echo "- ключ: **временный** (секреты не заданы) — перед установкой удалите старую версию"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: AutoSerialConsole-debug-apk
-          path: bin/*.apk
+          name: AutoSerialConsole-apk
+          path: dist/*.apk
           if-no-files-found: error
 
       - name: Upload build log
