@@ -42,6 +42,7 @@ from serial_core import (
     AUTO,
     BAUD_DETECT_ORDER,
     GOOD_THRESHOLD,
+    MIN_SAMPLE_BYTES,
     MIN_ACCEPT,
     VENDOR_DB,
     AnsiFilter,
@@ -69,7 +70,10 @@ except Exception as _e:
 # usbserial4a: столько миллисекунд ждёт USB bulk-чтение (по умолчанию 5000).
 READ_TIMEOUT_MS = 250
 # Сколько всего ждём ответа на одной скорости при подборе.
-PROBE_TIME = 1.2
+# Даём задержавшемуся баннеру время появиться и собираем контекст после ответа.
+PROBE_TIME = 1.5
+PROBE_MIN_TIME = 0.75
+PROBE_IDLE_TIME = 0.4
 # Ограничение истории терминала (строк) и размер порции для одного Label.
 TERM_MAX_LINES = 2000
 TERM_CHUNK_LINES = 25
@@ -498,9 +502,13 @@ class AutoSerialApp(App):
             time.sleep(0.1)
             port.write(b"\r\n")
 
-            deadline = time.time() + probe_time
-            idle = time.time() + 0.35
-            while time.time() < deadline and time.time() < idle:
+            started = time.monotonic()
+            deadline = started + probe_time
+            idle_deadline = deadline
+            while time.monotonic() < deadline:
+                now = time.monotonic()
+                if now - started >= PROBE_MIN_TIME and now >= idle_deadline:
+                    break
                 try:
                     n = port.in_waiting
                 except Exception:
@@ -509,7 +517,7 @@ class AutoSerialApp(App):
                     chunk = port.read(n)
                     if chunk:
                         data += chunk
-                        idle = time.time() + 0.35
+                        idle_deadline = time.monotonic() + PROBE_IDLE_TIME
                 else:
                     time.sleep(0.02)
         except Exception as e:
@@ -546,7 +554,7 @@ class AutoSerialApp(App):
             if best is None or score > best[0]:
                 best = (score, baud, data)
 
-            if score >= GOOD_THRESHOLD and len(data) >= 3:
+            if score >= GOOD_THRESHOLD and len(data) >= MIN_SAMPLE_BYTES:
                 break
             if self._scan_stop.wait(0.08):
                 break
@@ -622,6 +630,9 @@ class AutoSerialApp(App):
             try:
                 n = port.in_waiting
                 if not n:
+                    # in_waiting() не блокирует в usbserial4a; без паузы поток
+                    # занял бы CPU на 100%, пока консоль молчит.
+                    time.sleep(0.01)
                     continue
                 data = port.read(n)
             except Exception as e:

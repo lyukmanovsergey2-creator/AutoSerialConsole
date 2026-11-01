@@ -30,7 +30,10 @@ class ScoreReadabilityTests(unittest.TestCase):
 
     def test_short_sample_is_penalized(self):
         # 4 печатных байта — мало для уверенного совпадения
-        self.assertAlmostEqual(score_readability(b"ABCD"), 0.5)
+        self.assertAlmostEqual(score_readability(b"ABCD"), 4.0 / 12.0)
+
+    def test_full_sample_is_not_penalized(self):
+        self.assertEqual(score_readability(b"Console ready"), 1.0)
 
 
 class DetectVendorTests(unittest.TestCase):

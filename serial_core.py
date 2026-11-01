@@ -14,6 +14,7 @@ AUTO = "Авто"
 BAUD_DETECT_ORDER = [9600, 115200, 38400, 57600, 19200, 2400, 4800, 1200, 230400]
 GOOD_THRESHOLD = 0.85
 MIN_ACCEPT = 0.60
+MIN_SAMPLE_BYTES = 12
 
 _PRINTABLE = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D, 0x08, 0x1B}
 
@@ -61,8 +62,8 @@ def score_readability(data):
     good = sum(1 for b in data if b in _PRINTABLE)
     ratio = good / len(data)
     n = len(data)
-    if n < 8:
-        return ratio * (n / 8.0)
+    if n < MIN_SAMPLE_BYTES:
+        return ratio * (n / float(MIN_SAMPLE_BYTES))
     return ratio
 
 
