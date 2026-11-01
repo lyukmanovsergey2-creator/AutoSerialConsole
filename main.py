@@ -20,6 +20,7 @@ AutoSerialConsole (Android) — автоподбор параметров USB-CO
 """
 
 import codecs
+import json
 import os
 import queue
 import threading
@@ -76,6 +77,17 @@ TERM_CHUNK_LINES = 25
 TX_WRITE_TIMEOUT = 0.5
 # Окончание строки, которое отправляется вместе с командой.
 LINE_ENDINGS = {"CR": b"\r", "LF": b"\n", "CRLF": b"\r\n"}
+# Файл быстрых команд (макросов) в приватном каталоге приложения.
+MACROS_FILE = "macros.json"
+MACRO_MAX = 12
+MACRO_MAX_LEN = 120
+
+
+def _escape_markup(text):
+    """Экранирует символы разметки Kivy ([], &), чтобы текст выводился как есть."""
+    return (text.replace("&", "&amp;")
+                .replace("[", "&bl;")
+                .replace("]", "&br;"))
 
 
 def _mono_font_path():
@@ -120,6 +132,17 @@ class AutoSerialApp(App):
         self._dtr = True
         self._mono_font = _mono_font_path()
         self._font_size = 13
+
+        # Данные приложения: макросы и сохранённые логи.
+        self._data_dir = self._get_data_dir()
+        self.macros = []
+        self._macro_edit = False
+        self._last_log_path = None
+        # Поиск по терминалу.
+        self._search_query = ""
+        self._matches = []
+        self._match_idx = 0
+        self.load_macros()
 
         # Клавиатура не должна закрывать поле ввода команды.
         try:
@@ -183,6 +206,9 @@ class AutoSerialApp(App):
                                     on_release=lambda *_: self.copy_terminal()))
         row_tools.add_widget(Button(text="Очистить", font_size="12sp",
                                     on_release=lambda *_: self.clear_terminal()))
+        row_tools.add_widget(Button(text="Лог", size_hint_x=None, width="48dp",
+                                    font_size="12sp",
+                                    on_release=lambda *_: self.save_log()))
         row_tools.add_widget(Button(text="A-", size_hint_x=None, width="44dp",
                                     font_size="12sp",
                                     on_release=lambda *_: self.change_font_size(-1)))
@@ -209,6 +235,44 @@ class AutoSerialApp(App):
                                       on_release=lambda *_: self.send_raw(b"\t")))
         root.add_widget(row_special)
 
+        # быстрые команды (макросы): тап — отправить, «Правка» — удаление
+        row_macros = BoxLayout(size_hint_y=None, height="36dp", spacing=4)
+        self.macro_scroll = ScrollView(size_hint_x=1, do_scroll_y=False,
+                                       do_scroll_x=True, bar_width=2)
+        self.macro_box = BoxLayout(orientation="horizontal", size_hint=(None, 1),
+                                   spacing=4)
+        self.macro_box.bind(minimum_width=self.macro_box.setter("width"))
+        self.macro_scroll.add_widget(self.macro_box)
+        row_macros.add_widget(self.macro_scroll)
+        row_macros.add_widget(Button(text="+", size_hint_x=None, width="40dp",
+                                     font_size="14sp",
+                                     on_release=lambda *_: self.add_macro()))
+        self.btn_macro_edit = Button(text="Правка", size_hint_x=None, width="64dp",
+                                     font_size="10sp",
+                                     on_release=lambda *_: self.toggle_macro_edit())
+        row_macros.add_widget(self.btn_macro_edit)
+        root.add_widget(row_macros)
+
+        # поиск по тексту терминала
+        row_search = BoxLayout(size_hint_y=None, height="36dp", spacing=4)
+        self.inp_search = TextInput(multiline=False, hint_text="поиск…",
+                                    font_size="12sp",
+                                    on_text_validate=lambda *_: self.search_terminal())
+        row_search.add_widget(self.inp_search)
+        row_search.add_widget(Button(text="Найти", size_hint_x=None, width="58dp",
+                                     font_size="11sp",
+                                     on_release=lambda *_: self.search_terminal()))
+        row_search.add_widget(Button(text="<", size_hint_x=None, width="32dp",
+                                     font_size="12sp",
+                                     on_release=lambda *_: self.next_match(-1)))
+        row_search.add_widget(Button(text=">", size_hint_x=None, width="32dp",
+                                     font_size="12sp",
+                                     on_release=lambda *_: self.next_match(1)))
+        row_search.add_widget(Button(text="×", size_hint_x=None, width="32dp",
+                                     font_size="14sp",
+                                     on_release=lambda *_: self.clear_search()))
+        root.add_widget(row_search)
+
         # ввод команды
         row4 = BoxLayout(size_hint_y=None, height="48dp", spacing=4)
         self.inp = TextInput(multiline=False, hint_text="команда…",
@@ -217,6 +281,8 @@ class AutoSerialApp(App):
         row4.add_widget(Button(text="⏎", size_hint_x=None, width="52dp",
                                on_release=lambda *_: self.send_line()))
         root.add_widget(row4)
+
+        self._render_macros()
 
         if not USB_OK:
             self._append("ВНИМАНИЕ: модуль usbserial4a недоступен.\n"
@@ -654,6 +720,11 @@ class AutoSerialApp(App):
 
     def clear_terminal(self):
         self._clear()
+        self._search_query = ""
+        self._matches = []
+        self._match_idx = 0
+        if hasattr(self, "inp_search"):
+            self.inp_search.text = ""
         self._set_status("Терминал очищен.")
 
     def change_font_size(self, delta):
@@ -664,6 +735,193 @@ class AutoSerialApp(App):
         for lbl in self._chunk_labels:
             lbl.font_size = "%dsp" % size
         self._set_status("Шрифт: %d" % size)
+
+    # ----------------------------------------------- файлы ------------------
+    def _get_data_dir(self):
+        try:
+            data = self.user_data_dir
+        except Exception:
+            data = ""
+        if not data:
+            data = os.path.join(os.path.expanduser("~"), ".autoserialconsole")
+        return data
+
+    def save_log(self):
+        text = self._term.text
+        if not text.strip():
+            self._set_status("Терминал пуст — сохранять нечего.")
+            return
+        try:
+            log_dir = os.path.join(self._data_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            name = time.strftime("terminal-%Y%m%d-%H%M%S.txt")
+            path = os.path.join(log_dir, name)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+                f.write("\n")
+        except Exception as e:
+            self._set_status("Не удалось сохранить лог: %s" % e)
+            return
+        self._last_log_path = path
+        self._set_status("Лог сохранён: %s (%d стр.)"
+                         % (name, len(text.splitlines())))
+
+    # ----------------------------------------------- макросы ----------------
+    def _macros_path(self):
+        return os.path.join(self._data_dir, MACROS_FILE)
+
+    def load_macros(self):
+        try:
+            with open(self._macros_path(), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = []
+        if not isinstance(data, list):
+            data = []
+        self.macros = [str(x)[:MACRO_MAX_LEN] for x in data][:MACRO_MAX]
+
+    def save_macros(self):
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+            with open(self._macros_path(), "w", encoding="utf-8") as f:
+                json.dump(self.macros, f, ensure_ascii=False, indent=1)
+        except Exception as e:
+            self._set_status("Не удалось сохранить макросы: %s" % e)
+
+    def _render_macros(self):
+        box = getattr(self, "macro_box", None)
+        if box is None:
+            return
+        while box.children:
+            box.remove_widget(box.children[0])
+        for cmd in self.macros:
+            if self._macro_edit:
+                text = "× " + cmd
+                action = (lambda c=cmd: self.remove_macro(c))
+            else:
+                text = cmd
+                action = (lambda c=cmd: self.send_macro(c))
+            box.add_widget(Button(
+                text=text,
+                size_hint=(None, 1),
+                width="%ddp" % max(64, min(240, 8 * len(text) + 24)),
+                font_size="11sp",
+                on_release=lambda *_a, f=action: f()))
+
+    def add_macro(self):
+        cmd = self.inp.text.strip()
+        if not cmd:
+            self._set_status("Введите команду в поле ввода — она станет макросом.")
+            return
+        if len(cmd) > MACRO_MAX_LEN:
+            self._set_status("Слишком длинный макрос (максимум %d)." % MACRO_MAX_LEN)
+            return
+        if cmd in self.macros:
+            self._set_status("Такой макрос уже есть.")
+            return
+        if len(self.macros) >= MACRO_MAX:
+            self._set_status("Лимит макросов: %d." % MACRO_MAX)
+            return
+        self.macros.append(cmd)
+        self.save_macros()
+        self._render_macros()
+        self._set_status("Макрос добавлен: %s" % cmd)
+
+    def remove_macro(self, cmd):
+        if cmd in self.macros:
+            self.macros.remove(cmd)
+            self.save_macros()
+            self._render_macros()
+            self._set_status("Макрос удалён: %s" % cmd)
+
+    def toggle_macro_edit(self):
+        self._macro_edit = not self._macro_edit
+        if hasattr(self, "btn_macro_edit"):
+            self.btn_macro_edit.text = "Готово" if self._macro_edit else "Правка"
+        self._render_macros()
+        if self._macro_edit:
+            self._set_status("Режим удаления: нажмите на макрос, чтобы убрать его.")
+        else:
+            self._set_status("Макросы: нажатие отправляет команду.")
+
+    def send_macro(self, cmd=None):
+        if self._macro_edit:
+            if cmd is not None:
+                self.remove_macro(cmd)
+            return
+        if not self.macros:
+            self._set_status("Макросов пока нет: введите команду и нажмите «+».")
+            return
+        if cmd is None:
+            cmd = self.macros[0]
+        if self.port is None:
+            self._set_status("Порт не открыт.")
+            return
+        eol = LINE_ENDINGS.get(self.sp_eol.text, b"\r")
+        self.send_raw(cmd.encode("utf-8", "replace") + eol)
+        self._set_status("Отправлено: %s" % cmd)
+
+    # ----------------------------------------------- поиск ------------------
+    def search_terminal(self, query=None):
+        if query is None:
+            query = self.inp_search.text
+        self._search_query = (query or "").strip().lower()
+        self._match_idx = 0
+        self._recompute_matches()
+        self._render_terminal()
+        if not self._search_query:
+            self._set_status("Поиск сброшен.")
+            return
+        if self._matches:
+            self._scroll_to_line(self._matches[0])
+            self._set_status("Совпадений: %d (1/%d)"
+                             % (len(self._matches), len(self._matches)))
+        else:
+            self._set_status("Не найдено: %s" % self._search_query)
+
+    def next_match(self, delta=1):
+        if not self._search_query or not self._matches:
+            self._set_status("Нет совпадений.")
+            return
+        self._match_idx = (self._match_idx + delta) % len(self._matches)
+        self._scroll_to_line(self._matches[self._match_idx])
+        self._set_status("Совпадений: %d (%d/%d)"
+                         % (len(self._matches), self._match_idx + 1,
+                            len(self._matches)))
+
+    def clear_search(self):
+        self._search_query = ""
+        self._matches = []
+        self._match_idx = 0
+        if hasattr(self, "inp_search"):
+            self.inp_search.text = ""
+        self._render_terminal()
+        self._set_status("Поиск сброшен.")
+
+    def _recompute_matches(self, lines=None):
+        if not self._search_query:
+            self._matches = []
+            self._match_idx = 0
+            return
+        if lines is None:
+            lines = self._term.display_lines()
+        q = self._search_query
+        self._matches = [i for i, line in enumerate(lines) if q in line.lower()]
+        if self._match_idx >= len(self._matches):
+            self._match_idx = 0
+
+    def _scroll_to_line(self, line_idx):
+        chunk = line_idx // TERM_CHUNK_LINES
+        if not (0 <= chunk < len(self._chunk_labels)):
+            return
+        lbl = self._chunk_labels[chunk]
+        scroll_to = getattr(self.scroll, "scroll_to", None)
+        if scroll_to is None:
+            return
+        try:
+            scroll_to(lbl, padding=8, animate=False)
+        except Exception:
+            pass
 
     def toggle_dtr_rts(self):
         if self.port is None:
@@ -715,9 +973,32 @@ class AutoSerialApp(App):
 
     def _render_terminal(self):
         self._sync_terminal_view()
+        # При активном поиске не уводим экран вниз: пользователь смотрит
+        # на найденные совпадения, а не на последнюю строку.
+        if self._search_query:
+            return
         if not self._scroll_pending:
             self._scroll_pending = True
             Clock.schedule_once(self._scroll_bottom, 0)
+
+    def _markup_line(self, line):
+        """Подсвечивает все вхождения запроса жёлтым, экранируя разметку."""
+        q = self._search_query
+        if not q:
+            return line
+        low = line.lower()
+        out = []
+        pos = 0
+        while True:
+            found = low.find(q, pos)
+            if found < 0:
+                break
+            out.append(_escape_markup(line[pos:found]))
+            out.append("[color=ffff00]%s[/color]"
+                       % _escape_markup(line[found:found + len(q)]))
+            pos = found + len(q)
+        out.append(_escape_markup(line[pos:]))
+        return "".join(out)
 
     def _scroll_bottom(self, *_):
         self._scroll_pending = False
@@ -729,6 +1010,10 @@ class AutoSerialApp(App):
         # убираем с начала, потому что там самые старые строки.
         lines = self._term.display_lines()
         need = max(1, (len(lines) + TERM_CHUNK_LINES - 1) // TERM_CHUNK_LINES)
+        # Совпадения пересчитываем на каждом обновлении: поток вывода может
+        # добавить новые строки или обрезать историю.
+        self._recompute_matches(lines)
+        markup = bool(self._search_query)
 
         while len(self._chunk_labels) > need:
             self.term_box.remove_widget(self._chunk_labels.pop(0))
@@ -742,7 +1027,12 @@ class AutoSerialApp(App):
         # Label-ы остаются пустыми, а на границе чанка теряется строка.
         for idx, lbl in enumerate(self._chunk_labels):
             start = idx * TERM_CHUNK_LINES
-            text = "\n".join(lines[start:start + TERM_CHUNK_LINES])
+            chunk = lines[start:start + TERM_CHUNK_LINES]
+            if markup:
+                text = "\n".join(self._markup_line(line) for line in chunk)
+            else:
+                text = "\n".join(chunk)
+            lbl.markup = markup
             if lbl.text != text:
                 lbl.text = text
 
