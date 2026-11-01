@@ -719,12 +719,12 @@ class AutoSerialApp(App):
         self._set_status("Скопировано строк: %d" % len(text.splitlines()))
 
     def clear_terminal(self):
-        self._clear()
         self._search_query = ""
         self._matches = []
         self._match_idx = 0
         if hasattr(self, "inp_search"):
             self.inp_search.text = ""
+        self._clear()
         self._set_status("Терминал очищен.")
 
     def change_font_size(self, delta):

@@ -111,7 +111,10 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          set -uo pipefail
+          # GitHub запускает шаг через bash -e; отключаем автоаварию, чтобы
+          # ошибки попадали в наш лог и превращались в понятные аннотации,
+          # а не в молчаливый "exit code 2".
+          set +e
           # Подробный вывод шага уходит в файл: при ошибке хвост печатается
           # аннотациями, чтобы причину было видно без скачивания логов.
           LOG="$RUNNER_TEMP/sign.log"
@@ -145,10 +148,18 @@ jobs:
           echo "build-tools: $BT"
           ls "$BT" | head -40
 
-          APK=$(ls -t bin/*.apk 2>/dev/null | sed -n '1p')
-          [ -n "$APK" ] || die "После сборки в bin/ нет APK"
+          echo "cwd: $(pwd)"
+          echo "--- bin ---"
+          ls -la bin 2>&1 | head -30
+          echo "--- найденные APK ---"
+          find bin .buildozer -name '*.apk' -printf '%TY-%Tm-%Td %TH:%TM %p\n' 2>/dev/null | sort | tail -10
+
+          # Buildozer кладёт debug-APK в bin/, а release может оказаться глубже
+          # в .buildozer — берём самый свежий APK из обоих мест.
+          APK=$(find bin .buildozer -name '*.apk' -printf '%T@\t%p\n' 2>/dev/null \
+                | sort -nr | awk -F'\t' 'NR==1{print $2}')
+          [ -n "$APK" ] || die "APK не найден ни в bin/, ни в .buildozer/"
           echo "Исходный APK: $APK"
-          ls -l bin
 
           ALIAS="${KEY_ALIAS:-autoserial}"
           [ -n "${KEY_PASS:-}" ] || KEY_PASS="${KS_PASS:-}"
@@ -229,6 +240,15 @@ jobs:
           # 1) убрать ANSI-коды; 2) выкинуть служебные строки buildozer и
           # ENVIRONMENT-дамп (они начинаются с '#'); 3) показать хвост — там
           # настоящая ошибка (gradle / компилятор / p4a).
+          if [ -f "$RUNNER_TEMP/sign.log" ]; then
+            echo "### Лог подписи" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 40 "$RUNNER_TEMP/sign.log" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 20 "$RUNNER_TEMP/sign.log" 2>/dev/null | while IFS= read -r l; do
+              [ -n "$l" ] && printf '::error::S %s\n' "${l:0:800}"
+            done || true
+          fi
           sed -r 's/\x1b\[[0-9;?]*[mK]//g' build.log > /tmp/clean.log 2>/dev/null || cp build.log /tmp/clean.log
           grep -vE '^[[:space:]]*#' /tmp/clean.log > /tmp/noenv.log 2>/dev/null || cp /tmp/clean.log /tmp/noenv.log
           echo "### Хвост лога (без служебных строк)" >> "$GITHUB_STEP_SUMMARY"
