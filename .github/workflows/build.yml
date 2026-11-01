@@ -111,51 +111,90 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # Подробный вывод шага уходит в файл: при ошибке хвост печатается
+          # аннотациями, чтобы причину было видно без скачивания логов.
+          LOG="$RUNNER_TEMP/sign.log"
+          : > "$LOG"
+          exec 3>&1
+          exec >>"$LOG" 2>&1
+
+          warn() { printf '::warning title=Signature::%s\n' "$1" >&3; }
+          die() {
+            printf '::error title=Sign APK::%s\n' "$1" >&3
+            tail -n 25 "$LOG" 2>/dev/null | while IFS= read -r line; do
+              [ -n "$line" ] && printf '::error::%s\n' "${line:0:900}" >&3
+            done
+            exit 1
+          }
+
           export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
-          BT=$(ls -d "$HOME"/.buildozer/android/platform/android-sdk/build-tools/* | sort -V | tail -1)
-          APK=$(ls -t bin/*.apk | head -1)
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+
+          # Ищем build-tools в кэше Buildozer (путь может отличаться от версии к версии).
+          BT=""
+          for cand in "$HOME"/.buildozer/android/platform/android-sdk/build-tools/*/; do
+            [ -x "${cand}apksigner" ] && BT="${cand%/}"
+          done
+          if [ -z "$BT" ]; then
+            found=$(find "$HOME/.buildozer" -type f -name apksigner -print -quit 2>/dev/null)
+            if [ -n "$found" ]; then BT=$(dirname "$found"); fi
+          fi
+          [ -n "$BT" ] || die "Не найден apksigner (Android build-tools) в ~/.buildozer"
+          echo "build-tools: $BT"
+          ls "$BT" | head -40
+
+          APK=$(ls -t bin/*.apk 2>/dev/null | sed -n '1p')
+          [ -n "$APK" ] || die "После сборки в bin/ нет APK"
           echo "Исходный APK: $APK"
+          ls -l bin
 
           ALIAS="${KEY_ALIAS:-autoserial}"
           [ -n "${KEY_PASS:-}" ] || KEY_PASS="${KS_PASS:-}"
 
           if [ -n "${KS_B64:-}" ]; then
-            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore" \
+              || die "Не удалось декодировать keystore из секрета ANDROID_KEYSTORE_BASE64"
             echo "Подпись: постоянный ключ из секретов."
             STABLE=1
           else
-            echo "::warning title=Нет ключа подписи::Секрет ANDROID_KEYSTORE_BASE64 не задан — подписываю временным ключом. APK соберётся, но обновление поверх уже установленной версии не встанет."
+            warn "Секрет ANDROID_KEYSTORE_BASE64 не задан: подписываю временным ключом. Обновление поверх установленной версии не встанет."
             KS_PASS="${KS_PASS:-ephemeral}"
             KEY_PASS="${KEY_PASS:-ephemeral}"
             openssl req -x509 -newkey rsa:2048 -days 10000 -nodes \
               -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" \
-              -subj "/CN=AutoSerialConsole" >/dev/null 2>&1
+              -subj "/CN=AutoSerialConsole" || die "openssl: не удалось создать сертификат"
             openssl pkcs12 -export -in "$RUNNER_TEMP/cert.pem" \
               -inkey "$RUNNER_TEMP/key.pem" -name "$ALIAS" \
               -out "$RUNNER_TEMP/release.keystore" \
-              -passout "pass:$KS_PASS" >/dev/null 2>&1
+              -passout "pass:$KS_PASS" || die "openssl: не удалось создать keystore"
             STABLE=0
           fi
 
-          VERSION=$(grep -E '^version[[:space:]]*=' buildozer.spec | head -1 | cut -d= -f2 | tr -d ' ')
+          VERSION=$(awk -F= '/^version[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' buildozer.spec)
+          [ -n "$VERSION" ] || VERSION="unknown"
           OUT="dist/AutoSerialConsole-$VERSION.apk"
           mkdir -p dist
 
           # Убираем старую (debug) подпись, выравниваем и подписываем заново.
-          cp "$APK" "$RUNNER_TEMP/app-unsigned.apk"
+          cp "$APK" "$RUNNER_TEMP/app-unsigned.apk" || die "Не удалось скопировать APK"
           zip -q -d "$RUNNER_TEMP/app-unsigned.apk" \
             'META-INF/*.RSA' 'META-INF/*.SF' 'META-INF/*.MF' || true
-          "$BT/zipalign" -f -p 4 "$RUNNER_TEMP/app-unsigned.apk" "$RUNNER_TEMP/app-aligned.apk"
+          "$BT/zipalign" -f -p 4 "$RUNNER_TEMP/app-unsigned.apk" \
+            "$RUNNER_TEMP/app-aligned.apk" || die "zipalign не смог выровнять APK"
           "$BT/apksigner" sign \
             --ks "$RUNNER_TEMP/release.keystore" \
             --ks-key-alias "$ALIAS" \
             --ks-pass "pass:$KS_PASS" \
             --key-pass "pass:$KEY_PASS" \
-            --out "$OUT" "$RUNNER_TEMP/app-aligned.apk"
-          "$BT/apksigner" verify --print-certs "$OUT"
+            --out "$OUT" "$RUNNER_TEMP/app-aligned.apk" \
+            || die "apksigner не смог подписать APK"
+          "$BT/apksigner" verify --print-certs "$OUT" || die "Подпись не прошла проверку apksigner verify"
           ls -l "$OUT"
 
+          printf 'APK подписан: `%s` (version `%s`, ключ: %s)\n' "$OUT" "$VERSION" \
+            "$([ "$STABLE" = "1" ] && echo постоянный || echo временный)" >&3
           {
             echo "### APK подписан"
             echo ""
