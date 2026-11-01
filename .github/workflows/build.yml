@@ -87,17 +87,12 @@ jobs:
           # НЕ используем "yes |" (даёт SIGPIPE/141 после успеха) — лицензии
           # принимаются через android.accept_sdk_license=True. Берём РЕАЛЬНЫЙ
           # код возврата buildozer через PIPESTATUS, а не tee.
-          # Сначала пробуем release-сборку (не debuggable). Если gradle/p4a
-          # на ней спотыкается — откатываемся на проверенную debug-сборку;
-          # подпись всё равно накладывается отдельным шагом ниже.
+          # Собираем debug-вариант: он стабильно кладёт APK в bin/.
+          # Подпись всё равно заменяется постоянным ключом отдельным шагом,
+          # поэтому debuggable-флаг на обновления не влияет.
           set +e
-          buildozer -v android release 2>&1 | tee build.log
+          buildozer -v android debug 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
-          if [ $code -ne 0 ]; then
-            echo "::warning title=Release build failed::Собираю debug APK как запасной вариант"
-            buildozer -v android debug 2>&1 | tee -a build.log
-            code=${PIPESTATUS[0]}
-          fi
           echo "buildozer exit code: $code"
           exit $code
 
@@ -152,13 +147,15 @@ jobs:
           echo "--- bin ---"
           ls -la bin 2>&1 | head -30
           echo "--- найденные APK ---"
-          find bin .buildozer -name '*.apk' -printf '%TY-%Tm-%Td %TH:%TM %p\n' 2>/dev/null | sort | tail -10
+          find bin .buildozer "$HOME/.buildozer" -name '*.apk' \
+            -printf '%TY-%Tm-%Td %TH:%TM %p\n' 2>/dev/null | sort | tail -10
 
           # Buildozer кладёт debug-APK в bin/, а release может оказаться глубже
           # в .buildozer — берём самый свежий APK из обоих мест.
-          APK=$(find bin .buildozer -name '*.apk' -printf '%T@\t%p\n' 2>/dev/null \
+          APK=$(find bin .buildozer "$HOME/.buildozer" -name '*.apk' \
+                  -printf '%T@\t%p\n' 2>/dev/null \
                 | sort -nr | awk -F'\t' 'NR==1{print $2}')
-          [ -n "$APK" ] || die "APK не найден ни в bin/, ни в .buildozer/"
+          [ -n "$APK" ] || die "APK не найден в bin/, .buildozer/ и ~/.buildozer/"
           echo "Исходный APK: $APK"
 
           ALIAS="${KEY_ALIAS:-autoserial}"
