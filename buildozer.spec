@@ -8,10 +8,10 @@ source.include_exts = py,png,jpg,kv,atlas
 # Тесты не нужны внутри APK.
 source.exclude_dirs = tests
 
-version = 1.1
+version = 1.2
 # Android versionCode. Должен расти с каждым релизом, иначе система
 # откажется устанавливать обновление поверх старой версии.
-android.numeric_version = 110
+android.numeric_version = 120
 
 # Kivy + USB-OTG serial (CH34x/CP210x/FTDI/PL2303) + pyjnius для Android API.
 # Версии usb4a/usbserial4a зафиксированы для воспроизводимых сборок.

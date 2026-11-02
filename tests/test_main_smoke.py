@@ -300,12 +300,38 @@ class AppSmokeTests(unittest.TestCase):
         self.app.inp.text = "cmd"
         self.app.sp_eol.text = "LF"
         self.app.send_line()
-        self.assertEqual(self.app._tx_queue.get_nowait(), b"cmd\n")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"cmd")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"\n")
 
         self.app.inp.text = "cmd"
         self.app.sp_eol.text = "CRLF"
         self.app.send_line()
-        self.assertEqual(self.app._tx_queue.get_nowait(), b"cmd\r\n")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"cmd")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"\r\n")
+
+    def test_terminal_streams_question_mark_before_enter(self):
+        self.app.port = _FakePort(opens=True)
+        self.app._on_input_text(self.app.inp, "show")
+        self.app._on_input_text(self.app.inp, "show ?")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"show")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b" ?")
+        self.assertTrue(self.app._tx_queue.empty())
+
+    def test_terminal_enter_only_sends_line_ending_after_streaming(self):
+        self.app.port = _FakePort(opens=True)
+        self.app.sp_eol.text = "CR"
+        self.app._on_input_text(self.app.inp, "show ?")
+        self.app.inp.text = "show ?"
+        self.app.send_line()
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"show ?")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"\r")
+
+    def test_terminal_backspace_sends_delete_character(self):
+        self.app.port = _FakePort(opens=True)
+        self.app._on_input_text(self.app.inp, "showx")
+        self.app._on_input_text(self.app.inp, "show")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"showx")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"\x08")
 
     def test_font_size_changes_labels(self):
         old = self.app._font_size
@@ -369,6 +395,17 @@ class AppSmokeTests(unittest.TestCase):
         self.assertIsNone(self.app.port)
         self.assertTrue(self.app.btn_disc.disabled)
         self.assertFalse(self.app.btn_start.disabled)
+
+    def test_disconnect_closes_port_and_clears_terminal_input(self):
+        port = _FakePort(opens=True)
+        self.app.port = port
+        self.app.inp.text = "pending"
+        self.app._input_sent = "pending"
+        self.app.disconnect(silent=True)
+        self.assertIsNone(self.app.port)
+        self.assertTrue(port.closed)
+        self.assertEqual(self.app.inp.text, "")
+        self.assertEqual(self.app._input_sent, "")
 
     # ------------------------------------------------ сохранение лога ------
     def test_save_log_writes_file(self):

@@ -120,6 +120,8 @@ class AutoSerialApp(App):
         self._perm_stop = threading.Event()
         self._reader_stop = threading.Event()
         self._writer_stop = threading.Event()
+        self._reader_thread = None
+        self._writer_thread = None
         self._scanning = False
         self._perm_waiting = False
 
@@ -127,6 +129,10 @@ class AutoSerialApp(App):
         self._rx_chunks = []
         self._rx_text = ""
         self._tx_queue = queue.Queue()
+        # Text typed in the terminal is streamed immediately. This is required
+        # by network CLIs where '?' requests context help before Enter.
+        self._input_sent = ""
+        self._input_sync = False
 
         self._term = TerminalModel(TERM_MAX_LINES, TERM_CHUNK_LINES)
         self._ansi = AnsiFilter()
@@ -279,8 +285,10 @@ class AutoSerialApp(App):
 
         # ввод команды
         row4 = BoxLayout(size_hint_y=None, height="48dp", spacing=4)
-        self.inp = TextInput(multiline=False, hint_text="команда…",
+        self.inp = TextInput(multiline=False, keyboard_suggestions=False,
+                             hint_text="ввод сразу отправляется…",
                              on_text_validate=lambda *_: self.send_line())
+        self.inp.bind(text=self._on_input_text)
         row4.add_widget(self.inp)
         row4.add_widget(Button(text="⏎", size_hint_x=None, width="52dp",
                                on_release=lambda *_: self.send_line()))
@@ -484,6 +492,14 @@ class AutoSerialApp(App):
             port.write_timeout = TX_WRITE_TIMEOUT
         except Exception:
             pass
+        # A previous session may have left an old prompt or buffered bytes.
+        for reset_name in ("reset_input_buffer", "reset_output_buffer"):
+            try:
+                reset = getattr(port, reset_name, None)
+                if reset:
+                    reset()
+            except Exception:
+                pass
         try:
             port.dtr = True
             port.rts = True
@@ -614,14 +630,20 @@ class AutoSerialApp(App):
         self.btn_dtr.disabled = False
         self.btn_start.disabled = False
         self._append("\n--- Соединение: %d 8N1 ---\n"
-                     "--- Войдите (логин/пароль) ниже ---\n\n" % baud)
+                     "--- Войдите (логин/пароль) ниже ---\n"
+                     "Ввод отправляется сразу; ? вызывает справку, Enter завершает строку.\n\n"
+                     % baud)
 
-        threading.Thread(target=self._reader_worker, daemon=True).start()
-        threading.Thread(target=self._writer_worker, args=(port,), daemon=True).start()
+        self._input_sent = ""
+        self._reader_thread = threading.Thread(target=self._reader_worker,
+                                               args=(port,), daemon=True)
+        self._writer_thread = threading.Thread(target=self._writer_worker,
+                                               args=(port,), daemon=True)
+        self._reader_thread.start()
+        self._writer_thread.start()
         self.send_raw(b"\r\n")
 
-    def _reader_worker(self):
-        port = self.port
+    def _reader_worker(self, port):
         if port is None:
             return
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
@@ -701,10 +723,42 @@ class AutoSerialApp(App):
             self._set_status("Похоже на: %s" % vendor)
 
     def send_line(self):
-        s = self.inp.text
+        # Characters have already been streamed as they were typed.
+        # Enter only terminates the current command.
+        if self.port is None:
+            self.inp.text = ""
+            self._input_sent = ""
+            return
+        if self.inp.text != self._input_sent:
+            self._on_input_text(self.inp, self.inp.text)
+        self._input_sync = True
         self.inp.text = ""
+        self._input_sync = False
+        self._input_sent = ""
         eol = LINE_ENDINGS.get(self.sp_eol.text, b"\r")
-        self.send_raw(s.encode("utf-8", "replace") + eol)
+        self.send_raw(eol)
+
+    def _on_input_text(self, _widget, text):
+        """Stream edits as terminal keystrokes, including a bare '?'."""
+        if self._input_sync:
+            return
+        previous = self._input_sent
+        if text == previous:
+            return
+
+        # Find the changed span. Simple appends are the common path; the
+        # fallback supports backspace and replacing a selected suffix.
+        common = 0
+        limit = min(len(previous), len(text))
+        while common < limit and previous[common] == text[common]:
+            common += 1
+        removed = len(previous) - common
+        added = text[common:]
+        if removed:
+            self.send_raw(b"\x08" * removed)
+        if added:
+            self.send_raw(added.encode("utf-8", "replace"))
+        self._input_sent = text
 
     def send_raw(self, b):
         if self.port is None:
@@ -958,11 +1012,25 @@ class AutoSerialApp(App):
 
         port = self.port
         self.port = None
+        # Let USB bulk reads finish on their configured 250 ms timeout before
+        # releasing the Android USB interface. This prevents overlapping old
+        # and new reader sessions when switching to another switch.
+        current = threading.current_thread()
+        for attr in ("_reader_thread", "_writer_thread"):
+            worker = getattr(self, attr, None)
+            if worker is not None and worker is not current and worker.is_alive():
+                worker.join(timeout=0.6)
+            setattr(self, attr, None)
         if port is not None:
             try:
                 port.close()
             except Exception:
                 pass
+
+        self._input_sync = True
+        self.inp.text = ""
+        self._input_sync = False
+        self._input_sent = ""
 
         self.btn_disc.disabled = True
         self.btn_dtr.disabled = True
