@@ -211,7 +211,8 @@ jobs:
           printf '%s\n' "$CERT_INFO"
           if [ "$BUILD_MODE" = "release" ]; then
             EXPECTED_SIGNER="0f86a4d158edc944f03eea34eba49217739d0842faa18b4311c1e5473028c74d"
-            printf '%s\n' "$CERT_INFO" | grep -Fxq "Signer #1 certificate SHA-256 digest: $EXPECTED_SIGNER" \
+            SIGNERS=$(printf '%s\n' "$CERT_INFO" | awk -F': ' '/certificate SHA-256 digest:/ {print tolower($NF)}' | sort -u)
+            [ "$SIGNERS" = "$EXPECTED_SIGNER" ] \
               || die "Сертификат отличается от ключа обновления AutoSerialConsole."
             BADGING=$("$BT/aapt" dump badging "$OUT") || die "Не удалось прочитать манифест APK."
             VERSION_CODE=$(awk -F= '/^android.numeric_version[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' buildozer.spec)
