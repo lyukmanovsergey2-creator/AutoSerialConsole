@@ -13,6 +13,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -76,6 +77,16 @@ class _ScrollView(_Widget):
     pass
 
 
+class _DropDown(_Widget):
+    attach_to = None
+
+    def open(self, widget):
+        self.attach_to = widget
+
+    def dismiss(self):
+        self.attach_to = None
+
+
 class _Clipboard(object):
     text = ""
 
@@ -119,6 +130,7 @@ def _install_kivy_stubs():
 
     module("kivy.app", App=_App)
     module("kivy.clock", Clock=_Clock, mainthread=lambda f: f)
+    module("kivy.metrics", dp=lambda value: value)
     module("kivy.core")
     module("kivy.core.clipboard", Clipboard=_Clipboard)
     module("kivy.core.window", Window=module("kivy.core.window.window_stub"))
@@ -130,6 +142,9 @@ def _install_kivy_stubs():
     module("kivy.uix.textinput", TextInput=_TextInput)
     module("kivy.uix.spinner", Spinner=_Spinner)
     module("kivy.uix.scrollview", ScrollView=_ScrollView)
+    module("kivy.uix.dropdown", DropDown=_DropDown)
+    module("kivy.uix.screenmanager", Screen=_Widget, ScreenManager=_Widget,
+           NoTransition=object)
     module("kivy.utils", platform="win")
 
     # Window должен быть объектом с атрибутом softinput_mode
@@ -234,6 +249,55 @@ class AppSmokeTests(unittest.TestCase):
         self.assertIsNotNone(self.root)
         self.assertTrue(self.app._chunk_labels)
         self.assertEqual(self.app._term.text, "")
+        self.assertEqual(self.root.current, "connection")
+        self.assertEqual({screen.name for screen in self.root.children},
+                         {"connection", "terminal"})
+
+    def test_successful_connection_opens_terminal_and_back_closes_port(self):
+        port = _FakePort()
+        with patch.object(self.app, "_open_port", return_value=port), \
+             patch.object(main.threading, "Thread"):
+            self.app._finish_scan((1, 9600, b"ready"))
+            self.assertEqual(self.root.current, "terminal")
+            self.assertIn("9600 8N1", self.app.lbl_link.text)
+            self.assertFalse(self.app._command_row.disabled)
+            self.app._back_to_connection()
+        self.assertTrue(port.closed)
+        self.assertEqual(self.root.current, "connection")
+        self.app.btn_last_session.on_release()
+        self.assertEqual(self.root.current, "terminal")
+        self.assertTrue(self.app._command_row.disabled)
+
+    def test_terminal_tools_open_from_menu_and_close(self):
+        self.app._show_terminal()
+        self.assertEqual(self.app._tool_slot.children, [])
+        self.app._open_terminal_menu()
+        search = next(item for item in self.app._menu.children if item.text == "Поиск")
+        search.on_release()
+        self.assertEqual(self.app._tool_slot.children, [self.app._search_row])
+        self.app._close_terminal_tools()
+        self.assertEqual(self.app._tool_slot.children, [])
+
+    def test_question_key_sends_only_question_mark_after_command_prefix(self):
+        self.app.port = _FakePort()
+        self.app.inp.text = "show "
+        self.app._on_input_text(self.app.inp, self.app.inp.text)
+        question = next(item for item in self.app._key_row.children if item.text == "?")
+        question.on_release()
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"show ")
+        self.assertEqual(self.app._tx_queue.get_nowait(), b"?")
+        self.assertTrue(self.app._tx_queue.empty())
+
+    def test_usb_detach_keeps_terminal_visible_for_log_review(self):
+        self.app.port = _FakePort()
+        self.app.device = _FakeUsbDevice()
+        self.app._show_terminal()
+        with patch.object(self.app, "refresh_devices", return_value=[]):
+            self.app._poll_usb()
+        self.assertIsNone(self.app.port)
+        self.assertEqual(self.root.current, "terminal")
+        self.assertIn("потеряна", self.app.lbl_link.text)
+        self.assertTrue(self.app._command_row.disabled)
 
     def test_softinput_mode(self):
         window = sys.modules["kivy.core.window"].Window
@@ -394,7 +458,7 @@ class AppSmokeTests(unittest.TestCase):
         self.app.disconnect()
         self.assertIsNone(self.app.port)
         self.assertTrue(self.app.btn_disc.disabled)
-        self.assertFalse(self.app.btn_start.disabled)
+        self.assertTrue(self.app.btn_start.disabled)
 
     def test_disconnect_closes_port_and_clears_terminal_input(self):
         port = _FakePort(opens=True)
@@ -465,8 +529,10 @@ class AppSmokeTests(unittest.TestCase):
 
     # ------------------------------------------------ макросы ---------------
     def test_macro_add_and_reload(self):
-        self.app.inp.text = "show run"
+        self.app.port = _FakePort()
+        self.app.inp_macro.text = "show run"
         self.app.add_macro()
+        self.assertTrue(self.app._tx_queue.empty())
 
         self.assertEqual(self.app.macros, ["show run"])
         with open(os.path.join(self.tmpdir, "macros.json"),
@@ -475,6 +541,7 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(len(self.app.macro_box.children), 1)
 
         # Повторное добавление не создаёт дубль.
+        self.app.inp_macro.text = "show run"
         self.app.add_macro()
         self.assertEqual(self.app.macros, ["show run"])
 
@@ -484,7 +551,7 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(self.app.macros, ["show run"])
 
     def test_macro_add_requires_command(self):
-        self.app.inp.text = "   "
+        self.app.inp_macro.text = "   "
         self.app.add_macro()
         self.assertEqual(self.app.macros, [])
         self.assertIn("Введите команду", self.app.lbl_status.text)

@@ -29,9 +29,12 @@ import time
 import kivy
 from kivy.app import App
 from kivy.clock import Clock, mainthread
+from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
 from kivy.uix.button import Button
+from kivy.uix.dropdown import DropDown
+from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager
 from kivy.uix.textinput import TextInput
 from kivy.uix.spinner import Spinner
 from kivy.uix.scrollview import ScrollView
@@ -85,6 +88,12 @@ LINE_ENDINGS = {"CR": b"\r", "LF": b"\n", "CRLF": b"\r\n"}
 MACROS_FILE = "macros.json"
 MACRO_MAX = 12
 MACRO_MAX_LEN = 120
+
+BACKGROUND = (0.045, 0.065, 0.09, 1)
+SURFACE = (0.115, 0.15, 0.20, 1)
+ACCENT = (0.12, 0.34, 0.50, 1)
+MUTED = (0.69, 0.76, 0.82, 1)
+LINK_UP = (0.40, 0.90, 0.67, 1)
 
 
 def _escape_markup(text):
@@ -160,167 +169,254 @@ class AutoSerialApp(App):
         except Exception:
             pass
 
-        root = BoxLayout(orientation="vertical", padding=6, spacing=4)
+        Window.clearcolor = BACKGROUND
+        self.screens = ScreenManager(transition=NoTransition())
+        self._build_connection_screen()
+        self._build_terminal_screen()
+        self.screens.current = "connection"
+        if ANDROID:
+            Window.bind(on_keyboard=self._on_android_back)
+            self._usb_poll = Clock.schedule_interval(self._poll_usb, 1)
+        self.refresh_devices()
+        self._rx_poll = Clock.schedule_interval(self._flush_rx, 0.05)
+        return self.screens
 
-        # строка выбора устройства
-        row1 = BoxLayout(size_hint_y=None, height="44dp", spacing=4)
-        self.sp_dev = Spinner(text="(нет устройств)", values=[])
-        row1.add_widget(self.sp_dev)
-        row1.add_widget(Button(text="Обновить", size_hint_x=None, width="110dp",
-                               on_release=lambda *_: self.refresh_devices()))
-        root.add_widget(row1)
+    @staticmethod
+    def _button(text, action, primary=False, **kwargs):
+        return Button(text=text, on_release=lambda *_: action(),
+                      background_normal="", background_down="",
+                      background_color=ACCENT if primary else SURFACE,
+                      **kwargs)
 
-        # строка: вендор + скорость
-        row2 = BoxLayout(size_hint_y=None, height="44dp", spacing=4)
+    @staticmethod
+    def _status_label(text, height, **kwargs):
+        label = Label(text=text, size_hint_y=None, height=height,
+                      halign="left", valign="middle", **kwargs)
+        label.bind(size=lambda widget, size: setattr(widget, "text_size", size))
+        return label
+
+    @staticmethod
+    def _text_field(hint, **kwargs):
+        return TextInput(hint_text=hint, multiline=False, keyboard_suggestions=False,
+                         background_normal="", background_active="",
+                         background_color=SURFACE, foreground_color=(0.93, 0.96, 1, 1),
+                         cursor_color=LINK_UP, hint_text_color=MUTED, **kwargs)
+
+    def _build_connection_screen(self):
+        screen = Screen(name="connection")
+        scroll = ScrollView(do_scroll_x=False)
+        body = BoxLayout(orientation="vertical", size_hint_y=None,
+                         padding=dp(16), spacing=dp(8))
+        body.bind(minimum_height=body.setter("height"))
+        body.add_widget(self._status_label("AutoSerialConsole", "44dp", font_size="23sp"))
+        body.add_widget(self._status_label("Подключение", "28dp", font_size="17sp"))
+        self.lbl_usb = self._status_label("Поиск USB…", "36dp", color=MUTED)
+        body.add_widget(self.lbl_usb)
+
+        device_row = BoxLayout(size_hint_y=None, height="48dp", spacing=dp(8))
+        self.sp_dev = Spinner(text="(нет устройств)", values=[],
+                              text_autoupdate=False, font_size="13sp")
+        device_row.add_widget(self.sp_dev)
+        device_row.add_widget(self._button("Обновить", self.refresh_devices,
+                                           size_hint_x=None, width="86dp", font_size="13sp"))
+        body.add_widget(device_row)
+
         self.sp_vendor = Spinner(text="(не задан)", values=list(VENDOR_DB.keys()))
-        row2.add_widget(Label(text="Вендор:", size_hint_x=None, width="70dp"))
-        row2.add_widget(self.sp_vendor)
         self.sp_baud = Spinner(text=AUTO, values=[AUTO] + [str(b) for b in BAUD_DETECT_ORDER])
-        row2.add_widget(Label(text="Скор.:", size_hint_x=None, width="60dp"))
-        row2.add_widget(self.sp_baud)
-        root.add_widget(row2)
+        for title, spinner in (("Вендор", self.sp_vendor), ("Скорость", self.sp_baud)):
+            row = BoxLayout(size_hint_y=None, height="46dp", spacing=dp(8))
+            row.add_widget(self._status_label(title, "46dp", size_hint_x=None,
+                                              width="82dp", color=MUTED))
+            row.add_widget(spinner)
+            body.add_widget(row)
 
-        # кнопки управления
-        row3 = BoxLayout(size_hint_y=None, height="48dp", spacing=4)
-        self.btn_start = Button(text="СТАРТ", on_release=lambda *_: self.start_scan())
-        self.btn_stop = Button(text="Стоп", on_release=lambda *_: self.stop_scan(),
-                               disabled=True)
-        self.btn_disc = Button(text="Отключить", on_release=lambda *_: self.disconnect(),
-                               disabled=True)
-        self.btn_dtr = Button(text="DTR", on_release=lambda *_: self.toggle_dtr_rts(),
-                              disabled=True)
-        row3.add_widget(self.btn_start)
-        row3.add_widget(self.btn_stop)
-        row3.add_widget(self.btn_disc)
-        row3.add_widget(self.btn_dtr)
-        root.add_widget(row3)
+        actions = BoxLayout(size_hint_y=None, height="50dp", spacing=dp(8))
+        self.btn_start = self._button("Подключиться", self.start_scan, primary=True)
+        self.btn_stop = self._button("Отмена", self.stop_scan, disabled=True,
+                                     size_hint_x=None, width="86dp")
+        actions.add_widget(self.btn_start)
+        actions.add_widget(self.btn_stop)
+        body.add_widget(actions)
+        self.lbl_status = self._status_label("Готово.", "60dp", color=MUTED, font_size="13sp")
+        body.add_widget(self.lbl_status)
+        self.btn_last_session = self._button("Последний сеанс", self._show_terminal,
+                                              size_hint_y=None, height="44dp", disabled=True)
+        body.add_widget(self.btn_last_session)
+        scroll.add_widget(body)
+        screen.add_widget(scroll)
+        self.screens.add_widget(screen)
 
-        # статус
-        self.lbl_status = Label(text="Готово.", size_hint_y=None, height="30dp",
-                                halign="left", valign="middle")
-        self.lbl_status.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        root.add_widget(self.lbl_status)
+    def _build_terminal_screen(self):
+        screen = Screen(name="terminal")
+        body = BoxLayout(orientation="vertical", padding=dp(6), spacing=dp(4))
+        header = BoxLayout(size_hint_y=None, height="44dp", spacing=dp(6))
+        header.add_widget(self._button("‹ USB", self._back_to_connection,
+                                       size_hint_x=None, width="62dp"))
+        self.lbl_link = self._status_label("Порт закрыт", "44dp", font_size="13sp",
+                                           color=MUTED, shorten=True)
+        header.add_widget(self.lbl_link)
+        menu_button = self._button("Меню", self._open_terminal_menu,
+                                   size_hint_x=None, width="66dp")
+        header.add_widget(menu_button)
+        self._menu_button = menu_button
+        body.add_widget(header)
 
-        # терминал (прокручиваемый, текст разбит на порции Label-ов,
-        # чтобы не упереться в лимит размера текстуры GPU)
-        self.scroll = ScrollView()
+        self.scroll = ScrollView(do_scroll_x=False)
         self.term_box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=0)
         self.term_box.bind(minimum_height=self.term_box.setter("height"))
         self.scroll.add_widget(self.term_box)
-        root.add_widget(self.scroll)
+        body.add_widget(self.scroll)
         self._sync_terminal_view()
 
-        # инструменты терминала: копирование, очистка, размер шрифта
-        row_tools = BoxLayout(size_hint_y=None, height="40dp", spacing=4)
-        row_tools.add_widget(Button(text="Копировать", font_size="12sp",
-                                    on_release=lambda *_: self.copy_terminal()))
-        row_tools.add_widget(Button(text="Очистить", font_size="12sp",
-                                    on_release=lambda *_: self.clear_terminal()))
-        row_tools.add_widget(Button(text="Лог", size_hint_x=None, width="48dp",
-                                    font_size="12sp",
-                                    on_release=lambda *_: self.save_log()))
-        row_tools.add_widget(Button(text="A-", size_hint_x=None, width="44dp",
-                                    font_size="12sp",
-                                    on_release=lambda *_: self.change_font_size(-1)))
-        row_tools.add_widget(Button(text="A+", size_hint_x=None, width="44dp",
-                                    font_size="12sp",
-                                    on_release=lambda *_: self.change_font_size(1)))
-        root.add_widget(row_tools)
+        self.lbl_terminal_note = self._status_label("", 0, font_size="12sp",
+                                                    color=MUTED, shorten=True)
+        body.add_widget(self.lbl_terminal_note)
+        self._tool_slot = BoxLayout(orientation="vertical", size_hint_y=None, height=0)
+        body.add_widget(self._tool_slot)
 
-        # окончание строки и спецклавиши
-        row_special = BoxLayout(size_hint_y=None, height="40dp", spacing=4)
-        row_special.add_widget(Label(text="EOL:", size_hint_x=None, width="44dp",
-                                     font_size="12sp"))
-        self.sp_eol = Spinner(text="CR", values=["CR", "LF", "CRLF"],
-                              size_hint_x=None, width="72dp", font_size="12sp")
-        row_special.add_widget(self.sp_eol)
-        row_special.add_widget(Button(text="^C", size_hint_x=None, width="48dp",
-                                      font_size="12sp",
-                                      on_release=lambda *_: self.send_raw(b"\x03")))
-        row_special.add_widget(Button(text="Esc", size_hint_x=None, width="48dp",
-                                      font_size="12sp",
-                                      on_release=lambda *_: self.send_raw(b"\x1b")))
-        row_special.add_widget(Button(text="Tab", size_hint_x=None, width="48dp",
-                                      font_size="12sp",
-                                      on_release=lambda *_: self.send_raw(b"\t")))
-        root.add_widget(row_special)
+        self._key_row = BoxLayout(size_hint_y=None, height="42dp", spacing=dp(3), disabled=True)
+        for name, key in (("?", b"?"), ("Tab", b"\t"), ("Ctrl+C", b"\x03"),
+                          ("Esc", b"\x1b"), ("←", b"\x1b[D"), ("↑", b"\x1b[A"),
+                          ("↓", b"\x1b[B"), ("→", b"\x1b[C")):
+            self._key_row.add_widget(self._button(
+                name, lambda data=key: self._send_terminal_key(data), font_size="12sp"))
+        body.add_widget(self._key_row)
 
-        # быстрые команды (макросы): тап — отправить, «Правка» — удаление
-        row_macros = BoxLayout(size_hint_y=None, height="36dp", spacing=4)
-        self.macro_scroll = ScrollView(size_hint_x=1, do_scroll_y=False,
-                                       do_scroll_x=True, bar_width=2)
-        self.macro_box = BoxLayout(orientation="horizontal", size_hint=(None, 1),
-                                   spacing=4)
-        self.macro_box.bind(minimum_width=self.macro_box.setter("width"))
-        self.macro_scroll.add_widget(self.macro_box)
-        row_macros.add_widget(self.macro_scroll)
-        row_macros.add_widget(Button(text="+", size_hint_x=None, width="40dp",
-                                     font_size="14sp",
-                                     on_release=lambda *_: self.add_macro()))
-        self.btn_macro_edit = Button(text="Правка", size_hint_x=None, width="64dp",
-                                     font_size="10sp",
-                                     on_release=lambda *_: self.toggle_macro_edit())
-        row_macros.add_widget(self.btn_macro_edit)
-        root.add_widget(row_macros)
-
-        # поиск по тексту терминала
-        row_search = BoxLayout(size_hint_y=None, height="36dp", spacing=4)
-        self.inp_search = TextInput(multiline=False, hint_text="поиск…",
-                                    font_size="12sp",
-                                    on_text_validate=lambda *_: self.search_terminal())
-        row_search.add_widget(self.inp_search)
-        row_search.add_widget(Button(text="Найти", size_hint_x=None, width="58dp",
-                                     font_size="11sp",
-                                     on_release=lambda *_: self.search_terminal()))
-        row_search.add_widget(Button(text="<", size_hint_x=None, width="32dp",
-                                     font_size="12sp",
-                                     on_release=lambda *_: self.next_match(-1)))
-        row_search.add_widget(Button(text=">", size_hint_x=None, width="32dp",
-                                     font_size="12sp",
-                                     on_release=lambda *_: self.next_match(1)))
-        row_search.add_widget(Button(text="×", size_hint_x=None, width="32dp",
-                                     font_size="14sp",
-                                     on_release=lambda *_: self.clear_search()))
-        root.add_widget(row_search)
-
-        # ввод команды
-        row4 = BoxLayout(size_hint_y=None, height="48dp", spacing=4)
-        self.inp = TextInput(multiline=False, keyboard_suggestions=False,
-                             hint_text="ввод сразу отправляется…",
-                             on_text_validate=lambda *_: self.send_line())
+        self._command_row = BoxLayout(size_hint_y=None, height="48dp",
+                                      spacing=dp(4), disabled=True)
+        self.inp = self._text_field("Команда…", text_validate_unfocus=False,
+                                    font_name=self._mono_font, write_tab=False,
+                                    on_text_validate=lambda *_: self.send_line())
         self.inp.bind(text=self._on_input_text)
-        row4.add_widget(self.inp)
-        row4.add_widget(Button(text="⏎", size_hint_x=None, width="52dp",
-                               on_release=lambda *_: self.send_line()))
-        root.add_widget(row4)
+        self.sp_eol = Spinner(text="CR", values=["CR", "LF", "CRLF"],
+                              size_hint_x=None, width="58dp", font_size="12sp")
+        self._command_row.add_widget(self.inp)
+        self._command_row.add_widget(self.sp_eol)
+        self._command_row.add_widget(self._button("Enter", self.send_line, primary=True,
+                                                  size_hint_x=None, width="58dp"))
+        body.add_widget(self._command_row)
 
+        self._build_terminal_tools()
+        screen.add_widget(body)
+        self.screens.add_widget(screen)
+
+    def _build_terminal_tools(self):
+        self._search_row = BoxLayout(size_hint_y=None, height="44dp", spacing=dp(4))
+        self.inp_search = self._text_field("Найти в терминале",
+                                           on_text_validate=lambda *_: self.search_terminal())
+        self._search_row.add_widget(self.inp_search)
+        for name, action in (("Найти", self.search_terminal),
+                             ("‹", lambda: self.next_match(-1)),
+                             ("›", self.next_match), ("×", self._close_terminal_tools)):
+            self._search_row.add_widget(self._button(name, action, size_hint_x=None,
+                                                     width="54dp" if name == "Найти" else "40dp",
+                                                     font_size="12sp"))
+
+        self._macro_panel = BoxLayout(orientation="vertical", size_hint_y=None,
+                                      height="88dp", spacing=dp(4))
+        editor = BoxLayout(size_hint_y=None, height="42dp", spacing=dp(4))
+        self.inp_macro = self._text_field("Текст макроса",
+                                          on_text_validate=lambda *_: self.add_macro())
+        editor.add_widget(self.inp_macro)
+        editor.add_widget(self._button("+", self.add_macro, size_hint_x=None, width="40dp"))
+        editor.add_widget(self._button("×", self._close_terminal_tools,
+                                       size_hint_x=None, width="40dp"))
+        self._macro_panel.add_widget(editor)
+        row = BoxLayout(spacing=dp(4))
+        scroll = ScrollView(do_scroll_y=False, bar_width=dp(2))
+        self.macro_box = BoxLayout(size_hint=(None, 1), spacing=dp(4))
+        self.macro_box.bind(minimum_width=self.macro_box.setter("width"))
+        scroll.add_widget(self.macro_box)
+        row.add_widget(scroll)
+        self.btn_macro_edit = self._button("Правка", self.toggle_macro_edit,
+                                           size_hint_x=None, width="70dp")
+        row.add_widget(self.btn_macro_edit)
+        self._macro_panel.add_widget(row)
         self._render_macros()
 
-        if not USB_OK:
-            self._append("ВНИМАНИЕ: модуль usbserial4a недоступен.\n"
-                         "Это сборка не для Android или библиотека не включена.\n")
-            if _USB_ERR:
-                self._append("Причина: %s\n" % _USB_ERR)
+        self._menu = DropDown(auto_width=False, width=dp(222), max_height=dp(360))
+        for name, action in (
+            ("Поиск", lambda: self._show_terminal_tool(self._search_row)),
+            ("Сохранить журнал", self.save_log),
+            ("Макросы", lambda: self._show_terminal_tool(self._macro_panel)),
+            ("Копировать текст", self.copy_terminal),
+            ("Очистить терминал", self.clear_terminal),
+            ("Уменьшить шрифт", lambda: self.change_font_size(-1)),
+            ("Увеличить шрифт", lambda: self.change_font_size(1)),
+        ):
+            self._menu.add_widget(self._menu_item(name, action))
+        self.btn_dtr = self._menu_item("DTR/RTS: вкл.", self.toggle_dtr_rts, disabled=True)
+        self.btn_disc = self._menu_item("Отключить порт", self.disconnect, disabled=True)
+        self._menu.add_widget(self.btn_dtr)
+        self._menu.add_widget(self.btn_disc)
 
-        Clock.schedule_once(lambda *_: self.refresh_devices(), 0.5)
-        # Батч-вывод: не перерисовываем Label на каждый USB-чанк.
-        Clock.schedule_interval(self._flush_rx, 0.05)
-        return root
+    def _menu_item(self, text, action, **kwargs):
+        def select():
+            self._menu.dismiss()
+            action()
+        return self._button(text, select, size_hint_y=None, height="44dp", **kwargs)
+
+    def _open_terminal_menu(self):
+        self.inp.focus = False
+        self.inp_search.focus = False
+        self.inp_macro.focus = False
+        self._menu.open(self._menu_button)
+
+    def _show_terminal_tool(self, panel):
+        self._close_terminal_tools()
+        self._tool_slot.height = panel.height
+        self._tool_slot.add_widget(panel)
+
+    def _close_terminal_tools(self):
+        self.inp_search.focus = False
+        self.inp_macro.focus = False
+        for panel in list(self._tool_slot.children):
+            self._tool_slot.remove_widget(panel)
+        self._tool_slot.height = 0
+        if self._search_query:
+            self.clear_search()
+
+    def _show_terminal(self):
+        self.screens.current = "terminal"
+
+    def _back_to_connection(self):
+        self._menu.dismiss()
+        self._close_terminal_tools()
+        self.inp.focus = False
+        self.screens.current = "connection"
+        if self.port is not None:
+            self.disconnect()
+        self.refresh_devices(announce=False)
+
+    def _on_android_back(self, _window, key, *_):
+        if key != 27 or self.screens.current != "terminal":
+            return False
+        if self._menu.attach_to is not None:
+            self._menu.dismiss()
+        elif self._tool_slot.children:
+            self._close_terminal_tools()
+        else:
+            self._back_to_connection()
+        return True
 
     # ----------------------------------------------- устройства -------------
-    def refresh_devices(self):
+    def refresh_devices(self, announce=True):
         if not USB_OK:
-            return
+            self.lbl_usb.text = "USB недоступен"
+            self.btn_start.disabled = True
+            if announce:
+                self.lbl_status.text = _USB_ERR or "Нет доступа к USB-порту."
+            return None
         prev = self.sp_dev.text
-        self.device_map.clear()
-        names = []
-        skipped = 0
 
         try:
             devs = usb.get_usb_device_list() or []
         except Exception as e:
-            self._set_status("Ошибка списка USB: %s" % e)
-            devs = []
+            self.lbl_usb.text = "Ошибка чтения списка USB"
+            self.btn_start.disabled = True
+            if announce:
+                self.lbl_status.text = str(e)
+            return None
 
         serial_devs = [d for d in devs if is_probably_serial(d)]
         skipped = len(devs) - len(serial_devs)
@@ -329,6 +425,7 @@ class AutoSerialApp(App):
             serial_devs = list(devs)
             skipped = 0
 
+        device_map = {}
         for d in serial_devs:
             try:
                 name = d.getDeviceName()
@@ -337,18 +434,32 @@ class AutoSerialApp(App):
                 label = "%s (VID:%04x PID:%04x)" % (name, vid, pid)
             except Exception:
                 label = str(d)
-            names.append(label)
-            self.device_map[label] = d
-
-        if names:
+            device_map[label] = d
+        self.device_map = device_map
+        names = list(device_map)
+        if list(self.sp_dev.values) != names:
             self.sp_dev.values = names
-            self.sp_dev.text = prev if prev in names else names[0]
-            extra = (" (скрыто: %d)" % skipped) if skipped else ""
-            self._set_status("Найдено USB-устройств: %d%s" % (len(names), extra))
-        else:
-            self.sp_dev.values = []
-            self.sp_dev.text = "(нет устройств)"
-            self._set_status("USB-устройства не найдены. Подключите переходник через OTG.")
+        selected = prev if prev in names else (names[0] if names else "(нет устройств)")
+        if self.sp_dev.text != selected:
+            self.sp_dev.text = selected
+        self.btn_start.disabled = not names or self._scanning or self._perm_waiting
+        self.lbl_usb.text = ("OTG · Найдено USB-устройств: %d" % len(names) if names
+                             else "OTG · Подключите USB-переходник")
+        if announce and not (self._scanning or self._perm_waiting):
+            self.lbl_status.text = "Устройств скрыто: %d" % skipped if skipped else ""
+        return devs
+
+    def _poll_usb(self, _dt=0):
+        devices = self.refresh_devices(announce=False)
+        if devices is None or self.port is None or self.device is None:
+            return
+        try:
+            active_name = self.device.getDeviceName()
+            attached = any(dev.getDeviceName() == active_name for dev in devices)
+        except Exception:
+            return
+        if not attached:
+            self._on_link_lost(self.port, "USB-переходник отключён")
 
     def _selected_device(self):
         return self.device_map.get(self.sp_dev.text)
@@ -396,6 +507,7 @@ class AutoSerialApp(App):
         self._perm_waiting = True
         self.btn_start.disabled = True
         self.btn_stop.disabled = False
+        self.btn_last_session.disabled = True
         self._set_status("Ожидаю разрешение USB…")
         threading.Thread(target=self._perm_worker, args=(dev,), daemon=True).start()
 
@@ -418,13 +530,14 @@ class AutoSerialApp(App):
         self._perm_waiting = False
         self.btn_start.disabled = False
         self.btn_stop.disabled = True
+        self.btn_last_session.disabled = not bool(self._term.text)
         if self._perm_stop.is_set():
             self._set_status("Ожидание разрешения отменено.")
             return
         if granted:
             self._begin_scan(dev)
         else:
-            self._set_status("Разрешение на USB не выдано. Нажмите СТАРТ и разрешите доступ.")
+            self._set_status("Разрешение на USB не выдано. Повторите подключение и разрешите доступ.")
 
     def _begin_scan(self, dev):
         self.device = dev
@@ -432,6 +545,7 @@ class AutoSerialApp(App):
         self._scanning = True
         self.btn_start.disabled = True
         self.btn_stop.disabled = False
+        self.btn_last_session.disabled = True
         self.btn_disc.disabled = True
         self.btn_dtr.disabled = True
 
@@ -583,8 +697,10 @@ class AutoSerialApp(App):
         self._scanning = False
         self.btn_start.disabled = False
         self.btn_stop.disabled = True
+        self.btn_last_session.disabled = False
+        self.btn_last_session.text = "Журнал подключения"
 
-        if aborted:
+        if aborted or self._scan_stop.is_set():
             self._set_status("Подбор остановлен.")
             return
         if best is None:
@@ -628,13 +744,22 @@ class AutoSerialApp(App):
 
         self.btn_disc.disabled = False
         self.btn_dtr.disabled = False
+        self.btn_dtr.text = "DTR/RTS: вкл."
         self.btn_start.disabled = False
+        self.btn_last_session.disabled = False
+        self.btn_last_session.text = "Последний сеанс"
+        self._key_row.disabled = False
+        self._command_row.disabled = False
+        self.lbl_link.text = "Подключено · %d 8N1" % baud
+        self.lbl_link.color = LINK_UP
+        self._clear_command_input()
+        self._show_terminal()
+        self._set_status("")
         self._append("\n--- Соединение: %d 8N1 ---\n"
                      "--- Войдите (логин/пароль) ниже ---\n"
                      "Ввод отправляется сразу; ? вызывает справку, Enter завершает строку.\n\n"
                      % baud)
 
-        self._input_sent = ""
         self._reader_thread = threading.Thread(target=self._reader_worker,
                                                args=(port,), daemon=True)
         self._writer_thread = threading.Thread(target=self._writer_worker,
@@ -694,13 +819,12 @@ class AutoSerialApp(App):
             return
         self._append("\n[связь потеряна: %s]\n" % err)
         self.disconnect(silent=True)
-        self._set_status("Связь потеряна. Подключите переходник и нажмите СТАРТ.")
+        self.lbl_link.text = "Связь потеряна"
+        self._set_status("%s. Вернитесь к USB для подключения." % err)
 
     @mainthread
     def _on_tx_error(self, port, err):
-        if self.port is not port:
-            return
-        self._append("\n[ошибка записи: %s]\n" % err)
+        self._on_link_lost(port, "Ошибка записи: %s" % err)
 
     def _flush_rx(self, _dt=0):
         with self._rx_lock:
@@ -726,21 +850,32 @@ class AutoSerialApp(App):
         # Characters have already been streamed as they were typed.
         # Enter only terminates the current command.
         if self.port is None:
-            self.inp.text = ""
-            self._input_sent = ""
             return
         if self.inp.text != self._input_sent:
             self._on_input_text(self.inp, self.inp.text)
-        self._input_sync = True
-        self.inp.text = ""
-        self._input_sync = False
-        self._input_sent = ""
+            if self.inp.text != self._input_sent:
+                return
         eol = LINE_ENDINGS.get(self.sp_eol.text, b"\r")
-        self.send_raw(eol)
+        if self.send_raw(eol):
+            self._clear_command_input()
+
+    def _clear_command_input(self):
+        self._input_sync = True
+        try:
+            self.inp.text = ""
+            self._input_sent = ""
+        finally:
+            self._input_sync = False
+
+    def _send_terminal_key(self, data):
+        if self.send_raw(data):
+            # Клавиша может изменить строку на коммутаторе, например вызвать
+            # предыдущую команду. Локальное поле больше не отражает эту строку.
+            self._clear_command_input()
 
     def _on_input_text(self, _widget, text):
         """Stream edits as terminal keystrokes, including a bare '?'."""
-        if self._input_sync:
+        if self._input_sync or self.port is None:
             return
         previous = self._input_sent
         if text == previous:
@@ -754,19 +889,19 @@ class AutoSerialApp(App):
             common += 1
         removed = len(previous) - common
         added = text[common:]
-        if removed:
-            self.send_raw(b"\x08" * removed)
-        if added:
-            self.send_raw(added.encode("utf-8", "replace"))
-        self._input_sent = text
+        data = b"\x08" * removed + added.encode("utf-8", "replace")
+        if self.send_raw(data):
+            self._input_sent = text
 
     def send_raw(self, b):
         if self.port is None:
-            return
+            return False
         # Не даём очереди расти бесконечно, если адаптер завис.
         if self._tx_queue.qsize() > 256:
-            return
+            self._set_status("Порт занят. Дождитесь отправки.")
+            return False
         self._tx_queue.put(b)
+        return True
 
     def copy_terminal(self):
         text = self._term.text
@@ -874,7 +1009,7 @@ class AutoSerialApp(App):
                 on_release=lambda *_a, f=action: f()))
 
     def add_macro(self):
-        cmd = self.inp.text.strip()
+        cmd = self.inp_macro.text.strip()
         if not cmd:
             self._set_status("Введите команду в поле ввода — она станет макросом.")
             return
@@ -888,6 +1023,7 @@ class AutoSerialApp(App):
             self._set_status("Лимит макросов: %d." % MACRO_MAX)
             return
         self.macros.append(cmd)
+        self.inp_macro.text = ""
         self.save_macros()
         self._render_macros()
         self._set_status("Макрос добавлен: %s" % cmd)
@@ -923,8 +1059,8 @@ class AutoSerialApp(App):
             self._set_status("Порт не открыт.")
             return
         eol = LINE_ENDINGS.get(self.sp_eol.text, b"\r")
-        self.send_raw(cmd.encode("utf-8", "replace") + eol)
-        self._set_status("Отправлено: %s" % cmd)
+        if self.send_raw(cmd.encode("utf-8", "replace") + eol):
+            self._set_status("Отправлено: %s" % cmd)
 
     # ----------------------------------------------- поиск ------------------
     def search_terminal(self, query=None):
@@ -991,13 +1127,15 @@ class AutoSerialApp(App):
     def toggle_dtr_rts(self):
         if self.port is None:
             return
-        self._dtr = not self._dtr
+        enabled = not self._dtr
         try:
-            self.port.dtr = self._dtr
-            self.port.rts = self._dtr
-            self._append("[DTR/RTS %s]\n" % ("ON" if self._dtr else "OFF"))
+            self.port.dtr = enabled
+            self.port.rts = enabled
         except Exception as e:
             self._append("[DTR/RTS: ошибка %s]\n" % e)
+            return
+        self._dtr = enabled
+        self.btn_dtr.text = "DTR/RTS: " + ("вкл." if enabled else "выкл.")
 
     def disconnect(self, silent=False):
         self._reader_stop.set()
@@ -1027,17 +1165,19 @@ class AutoSerialApp(App):
             except Exception:
                 pass
 
-        self._input_sync = True
-        self.inp.text = ""
-        self._input_sync = False
-        self._input_sent = ""
+        self._flush_rx()
+        self._clear_command_input()
+        self.inp.focus = False
 
         self.btn_disc.disabled = True
         self.btn_dtr.disabled = True
-        if not self._scanning:
-            self.btn_start.disabled = False
+        self._key_row.disabled = True
+        self._command_row.disabled = True
+        self.lbl_link.text = "Порт закрыт"
+        self.lbl_link.color = MUTED
         if not silent:
             self._append("\n--- Соединение закрыто ---\n")
+            self._set_status("Соединение закрыто.")
 
     # ----------------------------------------------- вид терминала ----------
     def _new_term_label(self):
@@ -1140,7 +1280,11 @@ class AutoSerialApp(App):
 
     @mainthread
     def _set_status(self, text):
-        self.lbl_status.text = text
+        if self.screens.current == "terminal":
+            self.lbl_terminal_note.text = text
+            self.lbl_terminal_note.height = dp(25) if text else 0
+        else:
+            self.lbl_status.text = text
 
     def _log(self, text):
         self._append(text + "\n")
@@ -1150,24 +1294,18 @@ class AutoSerialApp(App):
         # Это событие Kivy (закрытие приложения), а не кнопка «Стоп».
         self._perm_stop.set()
         self._scan_stop.set()
+        if ANDROID:
+            self._usb_poll.cancel()
+            Window.unbind(on_keyboard=self._on_android_back)
+        if self._rx_poll is not None:
+            self._rx_poll.cancel()
         self.disconnect(silent=True)
 
     def on_pause(self):
         return True
 
     def on_resume(self):
-        self.refresh_devices()
-        if self.port is None or self.device is None:
-            return
-        try:
-            names = {d.getDeviceName() for d in (usb.get_usb_device_list() or [])}
-            name = self.device.getDeviceName()
-        except Exception:
-            return
-        if name not in names:
-            self._append("\n[USB-устройство отключено]\n")
-            self.disconnect(silent=True)
-            self._set_status("USB-устройство отключено. Подключите переходник и нажмите СТАРТ.")
+        self._poll_usb()
 
 
 if __name__ == "__main__":
