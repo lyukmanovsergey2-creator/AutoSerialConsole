@@ -1,14 +1,18 @@
 name: Build APK
 
 # Прямая сборка APK на раннере GitHub (без сторонних Docker-действий).
-# Запускается при пуше в main/master и fix/*, для pull request и вручную
+# Запускается при пуше в main/master и fix/*, для тегов v*, pull request и вручную
 # (Actions -> Run workflow).
 
 on:
   push:
     branches: [ main, master, 'fix/**' ]
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   # Быстрая проверка синтаксиса и логики — без Android SDK.
@@ -45,6 +49,8 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      BUILD_MODE: ${{ github.ref_type == 'tag' && 'release' || 'debug' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,11 +93,8 @@ jobs:
           # НЕ используем "yes |" (даёт SIGPIPE/141 после успеха) — лицензии
           # принимаются через android.accept_sdk_license=True. Берём РЕАЛЬНЫЙ
           # код возврата buildozer через PIPESTATUS, а не tee.
-          # Собираем debug-вариант: он стабильно кладёт APK в bin/.
-          # Подпись всё равно заменяется постоянным ключом отдельным шагом,
-          # поэтому debuggable-флаг на обновления не влияет.
           set +e
-          buildozer -v android debug 2>&1 | tee build.log
+          buildozer -v android "$BUILD_MODE" 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
           echo "buildozer exit code: $code"
           exit $code
@@ -150,11 +153,13 @@ jobs:
           find bin .buildozer "$HOME/.buildozer" -name '*.apk' \
             -printf '%TY-%Tm-%Td %TH:%TM %p\n' 2>/dev/null | sort | tail -10
 
-          # Buildozer кладёт debug-APK в bin/, а release может оказаться глубже
-          # в .buildozer — берём самый свежий APK из обоих мест.
-          APK=$(find bin .buildozer "$HOME/.buildozer" -name '*.apk' \
-                  -printf '%T@\t%p\n' 2>/dev/null \
-                | sort -nr | awk -F'\t' 'NR==1{print $2}')
+          if [ "$BUILD_MODE" = "release" ]; then
+            APK=$(find bin -type f -name '*-release-unsigned.apk' -print -quit)
+          else
+            APK=$(find bin .buildozer "$HOME/.buildozer" -name '*-debug.apk' \
+                    -printf '%T@\t%p\n' 2>/dev/null \
+                  | sort -nr | awk -F'\t' 'NR==1{print $2}')
+          fi
           [ -n "$APK" ] || die "APK не найден в bin/, .buildozer/ и ~/.buildozer/"
           echo "Исходный APK: $APK"
 
@@ -167,6 +172,7 @@ jobs:
             echo "Подпись: постоянный ключ из секретов."
             STABLE=1
           else
+            [ "$BUILD_MODE" != "release" ] || die "Для релиза требуется постоянный ключ подписи."
             warn "Секрет ANDROID_KEYSTORE_BASE64 не задан: подписываю временным ключом. Обновление поверх установленной версии не встанет."
             KS_PASS="${KS_PASS:-ephemeral}"
             KEY_PASS="${KEY_PASS:-ephemeral}"
@@ -182,6 +188,9 @@ jobs:
 
           VERSION=$(awk -F= '/^version[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' buildozer.spec)
           [ -n "$VERSION" ] || VERSION="unknown"
+          if [ "$BUILD_MODE" = "release" ]; then
+            [ "$GITHUB_REF_NAME" = "v$VERSION" ] || die "Тег не соответствует версии $VERSION."
+          fi
           OUT="dist/AutoSerialConsole-$VERSION.apk"
           mkdir -p dist
 
@@ -198,7 +207,18 @@ jobs:
             --key-pass "pass:$KEY_PASS" \
             --out "$OUT" "$RUNNER_TEMP/app-aligned.apk" \
             || die "apksigner не смог подписать APK"
-          "$BT/apksigner" verify --print-certs "$OUT" || die "Подпись не прошла проверку apksigner verify"
+          CERT_INFO=$("$BT/apksigner" verify --print-certs "$OUT") || die "Подпись не прошла проверку apksigner verify"
+          printf '%s\n' "$CERT_INFO"
+          if [ "$BUILD_MODE" = "release" ]; then
+            EXPECTED_SIGNER="0f86a4d158edc944f03eea34eba49217739d0842faa18b4311c1e5473028c74d"
+            printf '%s\n' "$CERT_INFO" | grep -Fxq "Signer #1 certificate SHA-256 digest: $EXPECTED_SIGNER" \
+              || die "Сертификат отличается от ключа обновления AutoSerialConsole."
+            BADGING=$("$BT/aapt" dump badging "$OUT") || die "Не удалось прочитать манифест APK."
+            VERSION_CODE=$(awk -F= '/^android.numeric_version[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' buildozer.spec)
+            [[ "$BADGING" == *"package: name='org.scan.kom.autoserialconsole' versionCode='$VERSION_CODE' versionName='$VERSION'"* ]] \
+              || die "Манифест APK не соответствует версии или идентификатору приложения."
+            [[ "$BADGING" != *"application-debuggable"* ]] || die "Отладочная сборка не может быть опубликована."
+          fi
           ls -l "$OUT"
 
           printf 'APK подписан: `%s` (version `%s`, ключ: %s)\n' "$OUT" "$VERSION" \
@@ -261,3 +281,44 @@ jobs:
           tail -n 4 /tmp/noenv.log | while IFS= read -r line; do
             [ -n "$line" ] && printf '::error::T %s\n' "${line:0:550}"
           done || true
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: AutoSerialConsole-apk
+          path: dist
+      - name: Publish APK and SHA-256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          version="${tag#v}"
+          apk="AutoSerialConsole-$version.apk"
+          notes=".github/release-notes/$tag.md"
+          test -s "$notes"
+          (cd dist && sha256sum "$apk" > "$apk.sha256")
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" = false ]; then
+              echo "Релиз $tag уже опубликован."
+              exit 0
+            fi
+            gh release upload "$tag" "dist/$apk" "dist/$apk.sha256" --clobber
+          else
+            gh release create "$tag" "dist/$apk" "dist/$apk.sha256" \
+              --verify-tag --draft --title "AutoSerialConsole $version" --notes-file "$notes"
+          fi
+          gh release edit "$tag" --draft=false --latest

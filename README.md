@@ -4,7 +4,11 @@
 Подключение: телефон — OTG (USB→Type-C) — переходник USB-COM (CH340 и пр.) —
 консольный кабель — коммутатор.
 
-## Как получить APK (сборка на GitHub Actions)
+## Скачать APK
+
+Подписанные версии доступны в [GitHub Releases](https://github.com/lyukmanovsergey2-creator/AutoSerialConsole/releases/latest). Скачайте APK из раздела Assets. Файл с расширением `.sha256` содержит его контрольную сумму.
+
+## Сборка на GitHub Actions
 
 1. Запушьте этот каталог в репозиторий GitHub (ветка `main`).
 2. Откройте вкладку **Actions** — workflow «Build APK» запустится сам

@@ -12,6 +12,7 @@ version = 1.3
 # Android versionCode. Должен расти с каждым релизом, иначе система
 # откажется устанавливать обновление поверх старой версии.
 android.numeric_version = 130
+android.release_artifact = apk
 
 # Kivy + USB-OTG serial (CH34x/CP210x/FTDI/PL2303) + pyjnius для Android API.
 # Версии usb4a/usbserial4a зафиксированы для воспроизводимых сборок.
