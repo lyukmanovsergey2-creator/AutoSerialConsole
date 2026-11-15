@@ -60,14 +60,25 @@ from serial_core import (
 ANDROID = platform == "android"
 USB_OK = False
 _USB_ERR = ""
-try:
-    from usb4a import usb
-    from usbserial4a import serial4a
+usb = None
+serial4a = None
+
+
+def _load_usb():
+    """Retry the Android Java bridge after the Activity has started."""
+    global usb, serial4a, USB_OK, _USB_ERR
+    if USB_OK:
+        return True
+    try:
+        from usb4a import usb as usb_module
+        from usbserial4a import serial4a as serial_module
+    except Exception as exc:
+        _USB_ERR = str(exc)
+        return False
+    usb, serial4a = usb_module, serial_module
     USB_OK = True
-except Exception as _e:
-    usb = None
-    serial4a = None
-    _USB_ERR = str(_e)
+    _USB_ERR = ""
+    return True
 
 
 # usbserial4a: столько миллисекунд ждёт USB bulk-чтение (по умолчанию 5000).
@@ -177,7 +188,7 @@ class AutoSerialApp(App):
         if ANDROID:
             Window.bind(on_keyboard=self._on_android_back)
             self._usb_poll = Clock.schedule_interval(self._poll_usb, 1)
-        self.refresh_devices()
+        self._usb_start = Clock.schedule_once(lambda *_: self.refresh_devices(), 0.5)
         self._rx_poll = Clock.schedule_interval(self._flush_rx, 0.05)
         return self.screens
 
@@ -401,11 +412,10 @@ class AutoSerialApp(App):
 
     # ----------------------------------------------- устройства -------------
     def refresh_devices(self, announce=True):
-        if not USB_OK:
+        self.btn_start.disabled = self._scanning or self._perm_waiting
+        if not _load_usb():
             self.lbl_usb.text = "USB недоступен"
-            self.btn_start.disabled = True
-            if announce:
-                self.lbl_status.text = _USB_ERR or "Нет доступа к USB-порту."
+            self.lbl_status.text = _USB_ERR or "Нет доступа к USB-порту. Повторите обновление."
             return None
         prev = self.sp_dev.text
 
@@ -413,9 +423,7 @@ class AutoSerialApp(App):
             devs = usb.get_usb_device_list() or []
         except Exception as e:
             self.lbl_usb.text = "Ошибка чтения списка USB"
-            self.btn_start.disabled = True
-            if announce:
-                self.lbl_status.text = str(e)
+            self.lbl_status.text = str(e)
             return None
 
         serial_devs = [d for d in devs if is_probably_serial(d)]
@@ -442,7 +450,6 @@ class AutoSerialApp(App):
         selected = prev if prev in names else (names[0] if names else "(нет устройств)")
         if self.sp_dev.text != selected:
             self.sp_dev.text = selected
-        self.btn_start.disabled = not names or self._scanning or self._perm_waiting
         self.lbl_usb.text = ("OTG · Найдено USB-устройств: %d" % len(names) if names
                              else "OTG · Подключите USB-переходник")
         if announce and not (self._scanning or self._perm_waiting):
@@ -466,15 +473,14 @@ class AutoSerialApp(App):
 
     # ----------------------------------------------- подбор -----------------
     def start_scan(self):
-        if not USB_OK:
-            self._set_status("usbserial4a недоступен — это не Android-сборка.")
-            return
         if self._scanning or self._perm_waiting:
+            return
+        if self.refresh_devices(announce=False) is None:
             return
 
         dev = self._selected_device()
         if dev is None:
-            self._set_status("Выберите USB-устройство.")
+            self._set_status("USB-устройства не найдены. Подключите переходник через OTG и повторите подключение.")
             return
 
         # Новый подбор при открытом терминале: старый порт обязательно закрыть,
@@ -488,7 +494,8 @@ class AutoSerialApp(App):
                 self._wait_permission(dev)
                 return
         except Exception as e:
-            self._log("Не удалось проверить разрешение USB: %s" % e)
+            self._set_status("Не удалось запросить доступ к USB: %s" % e)
+            return
 
         self._begin_scan(dev)
 
@@ -1294,6 +1301,8 @@ class AutoSerialApp(App):
         # Это событие Kivy (закрытие приложения), а не кнопка «Стоп».
         self._perm_stop.set()
         self._scan_stop.set()
+        if self._usb_start is not None:
+            self._usb_start.cancel()
         if ANDROID:
             self._usb_poll.cancel()
             Window.unbind(on_keyboard=self._on_android_back)

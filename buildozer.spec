@@ -8,10 +8,10 @@ source.include_exts = py,png,jpg,kv,atlas
 # Тесты не нужны внутри APK.
 source.exclude_dirs = tests
 
-version = 1.3
+version = 1.4
 # Android versionCode. Должен расти с каждым релизом, иначе система
 # откажется устанавливать обновление поверх старой версии.
-android.numeric_version = 130
+android.numeric_version = 140
 android.release_artifact = apk
 
 # Kivy + USB-OTG serial (CH34x/CP210x/FTDI/PL2303) + pyjnius для Android API.

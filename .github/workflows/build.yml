@@ -44,9 +44,29 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tests -v
 
+  ui:
+    name: Real Kivy USB startup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Kivy and virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1 libmtdev1
+          python -m pip install "kivy==2.3.0"
+      - name: Check USB startup through real widgets
+        env:
+          KIVY_NO_ARGS: "1"
+          SDL_AUDIODRIVER: dummy
+        run: xvfb-run -a python tests/ui_usb_smoke.py
+
   build:
     name: Buildozer (APK)
-    needs: test
+    needs: [test, ui]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:

@@ -454,11 +454,50 @@ class AppSmokeTests(unittest.TestCase):
         self.assertIn("VID:1a86", self.app.sp_dev.text)
         self.assertIn("скрыто: 1", self.app.lbl_status.text)
 
+    def test_usb_import_recovers_after_activity_initialization_error(self):
+        with patch.object(main, "USB_OK", False):
+            with patch.dict(sys.modules, {"usb4a": None}):
+                self.app.refresh_devices()
+            self.assertIn("USB недоступен", self.app.lbl_usb.text)
+            self.assertFalse(self.app.btn_start.disabled)
+            self.app.refresh_devices()
+            self.assertTrue(main.USB_OK)
+            self.assertNotIn("USB недоступен", self.app.lbl_usb.text)
+
+    def test_connect_discovers_adapter_attached_after_startup(self):
+        dev = _FakeUsbDevice()
+        with patch.object(main.usb, "get_usb_device_list", return_value=[dev]), \
+             patch.object(self.app, "_begin_scan") as scan:
+            self.app.btn_start.on_release()
+            scan.assert_called_once_with(dev)
+
+    def test_usb_list_error_is_visible_and_connect_can_retry(self):
+        dev = _FakeUsbDevice()
+        with patch.object(main.usb, "get_usb_device_list",
+                          side_effect=[RuntimeError("Activity not ready"), [dev]]), \
+             patch.object(self.app, "_begin_scan") as scan:
+            self.app.btn_start.on_release()
+            self.assertIn("Activity not ready", self.app.lbl_status.text)
+            self.assertFalse(self.app.btn_start.disabled)
+            scan.assert_not_called()
+            self.app.btn_start.on_release()
+            scan.assert_called_once_with(dev)
+
+    def test_permission_error_does_not_start_scan(self):
+        with patch.object(main.usb, "get_usb_device_list", return_value=[_FakeUsbDevice()]), \
+             patch.object(main.usb, "has_usb_permission", return_value=False), \
+             patch.object(main.usb, "request_usb_permission",
+                          side_effect=RuntimeError("USB permission failed")), \
+             patch.object(self.app, "_begin_scan") as scan:
+            self.app.start_scan()
+            scan.assert_not_called()
+            self.assertIn("USB permission failed", self.app.lbl_status.text)
+
     def test_disconnect_without_port(self):
         self.app.disconnect()
         self.assertIsNone(self.app.port)
         self.assertTrue(self.app.btn_disc.disabled)
-        self.assertTrue(self.app.btn_start.disabled)
+        self.assertFalse(self.app.btn_start.disabled)
 
     def test_disconnect_closes_port_and_clears_terminal_input(self):
         port = _FakePort(opens=True)
